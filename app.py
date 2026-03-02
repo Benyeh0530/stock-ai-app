@@ -8,6 +8,7 @@ import pytz
 import json
 import re
 import time
+import numpy as np
 
 # --- 基礎設定 ---
 st.set_page_config(page_title="AI 智能監控戰情室", layout="wide", initial_sidebar_state="expanded")
@@ -31,355 +32,364 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🐘 引擎A：歷史重裝引擎 (快取 15 分鐘)
-@st.cache_data(ttl=900)
-def get_historical_features(code):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    }
-    for suffix in [".TW", ".TWO"]:
+@st.cache_data(ttl=60)
+def get_market_temp():
+    """🌡️ 大盤溫度計：抓取台股加權指數與美股那斯達克"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    indices = {'^TWII': '台股加權', '^IXIC': '那斯達克'}
+    results = {}
+    for code, name in indices.items():
         try:
-            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=3mo"
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=2d"
+            res = requests.get(url, headers=headers, timeout=3).json()
+            quotes = res['chart']['result'][0]['indicators']['quote'][0]['close']
+            closes = [c for c in quotes if c is not None]
+            if len(closes) >= 2:
+                curr, prev = closes[-1], closes[-2]
+                pct = ((curr - prev) / prev) * 100
+                results[name] = (curr, pct)
+        except: pass
+    return results
+
+@st.cache_data(ttl=900)
+def get_historical_features(code, is_us=False):
+    """支援台美股的歷史日K引擎"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    suffixes = [""] if is_us else [".TW", ".TWO"]
+    for suffix in suffixes:
+        try:
+            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=1y"
             res_1d = requests.get(url_1d, headers=headers, timeout=5).json()
             if not res_1d.get('chart', {}).get('result'): continue 
             
             res_1d_data = res_1d['chart']['result'][0]
-            idx_1d = pd.to_datetime(res_1d_data['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
+            idx_1d = pd.to_datetime(res_1d_data['timestamp'], unit='s', utc=True)
             quote_1d = res_1d_data['indicators']['quote'][0]
             df_daily = pd.DataFrame({
                 'Open': quote_1d['open'], 'High': quote_1d['high'],
                 'Low': quote_1d['low'], 'Close': quote_1d['close'], 'Volume': quote_1d['volume']
             }, index=idx_1d).dropna()
-
-            url_15m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=15m&range=5d"
-            res_15m = requests.get(url_15m, headers=headers, timeout=5).json()
-            res_15m_data = res_15m['chart']['result'][0]
-            idx_15m = pd.to_datetime(res_15m_data['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
-            quote_15m = res_15m_data['indicators']['quote'][0]
-            df_15m = pd.DataFrame({'Close': quote_15m['close']}, index=idx_15m).dropna()
             
-            ma20_15k = df_15m['Close'].tail(20).mean() if len(df_15m) >= 20 else df_15m['Close'].mean()
+            # 計算 RSI 供長線參考
+            delta = df_daily['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df_daily['RSI'] = 100 - (100 / (1 + rs))
+
+            ma20_15k = None
+            if not is_us:
+                url_15m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=15m&range=5d"
+                res_15m = requests.get(url_15m, headers=headers, timeout=5).json()
+                res_15m_data = res_15m['chart']['result'][0]
+                idx_15m = pd.to_datetime(res_15m_data['timestamp'], unit='s', utc=True)
+                df_15m = pd.DataFrame({'Close': res_15m_data['indicators']['quote'][0]['close']}, index=idx_15m).dropna()
+                ma20_15k = df_15m['Close'].tail(20).mean() if len(df_15m) >= 20 else df_15m['Close'].mean()
 
             return df_daily, ma20_15k, suffix
         except:
             continue
     return pd.DataFrame(), None, ""
 
-# ⚡ 引擎B：極速秒級引擎 (無快取)
 def get_realtime_tick(code, suffix):
-    if not suffix: return pd.DataFrame()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
+    if suffix is None: return pd.DataFrame()
+    headers = {"User-Agent": "Mozilla/5.0"}
     url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d"
     try:
         res_1m = requests.get(url_1m, headers=headers, timeout=3).json()
         res_1m_data = res_1m['chart']['result'][0]
-        idx_1m = pd.to_datetime(res_1m_data['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
+        idx_1m = pd.to_datetime(res_1m_data['timestamp'], unit='s', utc=True)
         quote_1m = res_1m_data['indicators']['quote'][0]
-        df_1m = pd.DataFrame({
+        return pd.DataFrame({
             'Open': quote_1m['open'], 'High': quote_1m['high'],
             'Low': quote_1m['low'], 'Close': quote_1m['close'], 'Volume': quote_1m['volume']
         }, index=idx_1m).dropna()
-        return df_1m
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-# 🚀 引擎C：連動股專屬極速報價 (快取5秒)
 @st.cache_data(ttl=5)
-def get_quick_quote(code):
+def get_quick_quote(code, is_us=False):
     stock_db = get_full_stock_db()
-    name = stock_db.get(code, code)
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    for suffix in [".TW", ".TWO"]:
+    name = code if is_us else stock_db.get(code, code)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    suffixes = [""] if is_us else [".TW", ".TWO"]
+    for suffix in suffixes:
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d"
             res = requests.get(url, headers=headers, timeout=2).json()
             if not res.get('chart', {}).get('result'): continue
-            
-            result = res['chart']['result'][0]
-            quotes = result['indicators']['quote'][0]
-            closes = [c for c in quotes['close'] if c is not None]
+            quotes = res['chart']['result'][0]['indicators']['quote'][0]['close']
+            closes = [c for c in quotes if c is not None]
             if len(closes) < 2: continue
-            
-            curr_p = closes[-1]
-            prev_close = closes[-2]
-            return curr_p, prev_close, name
-        except:
-            continue
+            return closes[-1], closes[-2], name
+        except: continue
     return None, None, name
 
 def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
     now = datetime.datetime.now(tw_tz)
-    is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 🚀 關鍵升級：強制加入【多空絕對互斥】與【不重複選股】鐵令
     prompt = f"""
-    現在是台灣時間 {time_str}。你是頂尖台股操盤手。
-    請給出你認為勝率最高的「絕對 TOP 5」精選名單。請嚴格依照以下 JSON 格式回傳，不可有其他多餘文字。
+    現在是台灣時間 {time_str}。你是頂尖跨國操盤手。
+    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。
     
-    【絕對限制條件 - 違反將導致系統崩潰】：
-    1. 所有推薦股票目前股價必須在 150 元（含）以下！
-    2. 每一個類別，必須精準提供剛好 5 檔股票！
-    3. 【名單絕對互斥】：這 4 個分類總共 20 檔股票，「絕對不可以有任何一檔股票重複」！作多的名單絕對不能出現在作空名單裡，波段名單也不能跟當沖名單重複！
-    4. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱」。
-    5. 【當沖震幅鐵令】：在「當沖作多」與「當沖作空」的選股中，必須挑選近期具備高周轉率，且「日震幅通常大於 5%」的熱門活躍股，絕對排除走勢溫吞的牛皮股！
+    【絕對限制】：
+    1. 台股推薦價格必須在 150 元以下。美股則無價格限制。
+    2. 每一個類別，精準提供 5 檔股票。各分類間名單絕對互斥不重複。
+    3. 必須在 strategy 填寫判斷基準。當沖必須找近期高震幅(>5%)標的。
 
     JSON 格式如下：
     {{
-      "資金熱點TOP5": [ 5筆資料 ],
-      "當沖作多": [ 5筆資料 ],
-      "當沖作空": [ 5筆資料 ],
-      "波段操作": [ 5筆資料 ],
-      "隔日沖": [ 5筆資料 ]
+      "美股波段作多": [ 5筆資料 (美股代碼如 AAPL, TSLA) ],
+      "資金熱點TOP5": [ 5筆台股資料 ],
+      "台股當沖作多": [ 5筆台股資料 ],
+      "台股當沖作空": [ 5筆台股資料 ]
     }}
-    
-    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "詳細理由分析"}})
+    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "理由"}})
     """
-    if not is_after_1230: prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
-
     try:
-        generation_config = genai.types.GenerationConfig(temperature=0.0)
-        response = ai_model.generate_content(prompt, generation_config=generation_config).text
+        response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
-        json_str = match.group(0) if match else response
-        return json.loads(json_str)
-    except Exception as e: 
-        return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
+        return json.loads(match.group(0) if match else response)
+    except Exception as e: return {"error": f"AI 產出錯誤: {e}"}
 
 @st.cache_data(ttl=86400)
-def get_correlated_stocks(code, name):
+def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
-    prompt = f"我是台股當沖客。請針對 {name}({code})，找出 3 檔台股中『同產業、最具高度連動性』的股票。要求：1. 必須剛好 3 檔。2. 第一檔必須是該族群的『絕對龍頭股』。3. 只能回傳純數字代碼，用半形逗號分隔。不要有任何其他文字。"
+    market = "美股" if is_us else "台股"
+    prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。只回傳純代碼，用逗號分隔。"
     try:
-        generation_config = genai.types.GenerationConfig(temperature=0.0)
-        res = ai_model.generate_content(prompt, generation_config=generation_config).text
-        codes = [c.strip() for c in res.split(',') if c.strip().isdigit()]
-        return codes[:3]
-    except:
-        return []
+        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
+    except: return []
 
 # --- 3. 網頁介面 ---
-st.title("⚡ AI 智能監控戰情室 (極速當沖版)")
+st.title("⚡ AI 跨海智能戰情室")
 
-if 'stocks' not in st.session_state: st.session_state.stocks = []
+# 狀態初始化
+if 'tw_stocks' not in st.session_state: st.session_state.tw_stocks = []
+if 'us_stocks' not in st.session_state: st.session_state.us_stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
+# 預設植入 10 年期 20 萬本金計畫的核心標的
+if 'core_assets' not in st.session_state: 
+    st.session_state.core_assets = [
+        {"code": "0050", "is_us": False}, {"code": "00891", "is_us": False},
+        {"code": "QQQ", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
+    ]
 
 all_stocks = get_full_stock_db()
+market_temp = get_market_temp()
 
+# 🌡️ 頂部大盤溫度計
+col_t1, col_t2, col_t3 = st.columns(3)
+with col_t1:
+    if '台股加權' in market_temp:
+        val, pct = market_temp['台股加權']
+        st.metric("🇹🇼 台股大盤溫度", f"{val:.2f}", f"{pct:.2f}%", delta_color="normal" if pct > 0 else "inverse")
+with col_t2:
+    if '那斯達克' in market_temp:
+        val, pct = market_temp['那斯達克']
+        st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{val:.2f}", f"{pct:.2f}%", delta_color="normal" if pct > 0 else "inverse")
+with col_t3:
+    tw_pct = market_temp.get('台股加權', (0,0))[1]
+    if tw_pct < -1.5:
+        st.error("🚨 警告：今日大盤重挫逆風，當沖請縮小部位，嚴控風險！")
+    elif tw_pct > 1.0:
+        st.success("🔥 大盤順風：多方動能強勁，可積極尋找突破口。")
+    else:
+        st.info("⚖️ 大盤震盪：請密切關注族群輪動與個股籌碼。")
+
+st.divider()
+
+# --- 側邊欄控制 ---
 with st.sidebar:
-    st.header("⚙️ 當沖實戰設定")
-    auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (每 3 秒)", value=False)
+    st.header("⚙️ 實戰監控設定")
+    auto_refresh = st.checkbox("⚡ 開啟台股極速自動更新 (3秒)", value=False)
     
     st.divider()
-
     st.header("🤖 AI 獨家選股報告")
     if st.button("🚀 立即生成全盤選股報告", use_container_width=True, type="primary"):
         st.session_state.ai_report = "loading"
         st.rerun()
         
     st.divider()
-    
-    st.header("🎯 自訂監控選單")
+    st.header("🎯 台股當沖監控加入")
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
-    selected_stock = st.selectbox("🔍 支援代碼或中文字搜尋", options=["請點此搜尋..."] + stock_list, index=0)
-    
-    if st.button("➕ 加入即時監控"):
-        if selected_stock and selected_stock != "請點此搜尋...":
-            input_code = selected_stock.split(" ")[0]
-            input_name = " ".join(selected_stock.split(" ")[1:])
-            
-            if input_code not in [s['code'] for s in st.session_state.stocks]:
-                st.session_state.stocks.append({"code": input_code, "name": input_name})
+    selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
+    if st.button("➕ 加入台股"):
+        if selected_tw and selected_tw != "請點此搜尋...":
+            code = selected_tw.split(" ")[0]
+            name = " ".join(selected_tw.split(" ")[1:])
+            if code not in [s['code'] for s in st.session_state.tw_stocks]:
+                st.session_state.tw_stocks.append({"code": code, "name": name})
                 st.rerun()
-    
-    if st.button("🗑️ 清空監控與日誌"):
-        st.session_state.stocks = []
+
+    st.header("🦅 美股波段監控加入")
+    us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA, TSLA)").strip().upper()
+    if st.button("➕ 加入美股"):
+        if us_code and us_code not in [s['code'] for s in st.session_state.us_stocks]:
+            st.session_state.us_stocks.append({"code": us_code, "name": us_code})
+            st.rerun()
+            
+    if st.button("🗑️ 清空所有自選與日誌"):
+        st.session_state.tw_stocks = []
+        st.session_state.us_stocks = []
         st.session_state.logs = [] 
         st.rerun()
 
+# --- AI 報告區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
-    st.subheader("🤖 AI 正在深度運算 TOP 5 精選清單 (約需 10~20 秒)...")
-    with st.spinner('建立多空互斥防線，篩選不重複的高勝率標的...'):
+    st.subheader("🤖 AI 正在深度運算跨國 TOP 5 精選清單...")
+    with st.spinner('建立多空互斥防線，掃描全球資金動向...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
     report_data = st.session_state.ai_report
-    
     with st.container(border=True):
-        st.subheader("🤖 AI 精選清單 (點擊看詳細分析)")
-        if "error" in report_data:
-            st.error(report_data["error"])
+        st.subheader("🤖 AI 跨海精選清單 (點擊看詳細分析)")
+        if "error" in report_data: st.error(report_data["error"])
         else:
             tabs = st.tabs(list(report_data.keys()))
             for i, (category, stocks) in enumerate(report_data.items()):
                 with tabs[i]:
-                    if not stocks: 
-                        st.info("時間未達或目前無符合條件的標的。")
+                    if not stocks: st.info("無符合條件標的。")
                     else:
                         for stock in stocks:
-                            display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '綜合評估')}"
-                            
+                            display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '')}"
                             with st.expander(display_title):
-                                st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
-                                if 'code' in stock and st.button(f"➕ 加入 {stock.get('name', '該檔')} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
-                                    if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
-                                        st.session_state.stocks.append({"code": stock['code'], "name": stock.get('name', '')})
+                                st.write(f"**詳細分析**：\n{stock.get('reason', '')}")
+                                is_us_cat = "美股" in category
+                                if 'code' in stock and st.button(f"➕ 加入看板", key=f"add_{category}_{stock['code']}"):
+                                    target_list = st.session_state.us_stocks if is_us_cat else st.session_state.tw_stocks
+                                    if stock['code'] not in [s['code'] for s in target_list]:
+                                        target_list.append({"code": stock['code'], "name": stock.get('name', stock['code'])})
                                         st.rerun()
-        st.divider()
         if st.button("✖️ 關閉報告"):
             st.session_state.ai_report = None
             st.rerun()
 
-st.divider()
+# 🚀 建立三大戰區 Tabs
+tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線 (20萬本金計畫)"])
 
-t_col1, t_col2 = st.columns([1, 1])
-with t_col1:
-    if st.button("🔄 手動刷新即時股價"):
-        st.cache_data.clear() 
-        st.rerun()
-with t_col2:
-    tw_tz = pytz.timezone('Asia/Taipei')
-    st.write(f"⏱️ 股價最後更新: {datetime.datetime.now(tw_tz).strftime('%H:%M:%S')}")
-
-st.subheader("📺 即時戰情看板")
-if not st.session_state.stocks:
-    st.info("請於左側選單搜尋並加入您想監控的標的。")
-else:
-    for stock in st.session_state.stocks:
-        code = stock['code']
-        name = stock['name']
-        
-        df_daily, ma20_15k, suffix = get_historical_features(code)
+# ====================
+# 戰區 1：台股極速當沖
+# ====================
+with tab_tw:
+    if not st.session_state.tw_stocks: st.info("請於左側加入台股。")
+    for stock in st.session_state.tw_stocks:
+        code, name = stock['code'], stock['name']
+        df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
         if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
             curr_p = df_1m['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
-            high_p = df_1m['High'].max()
-            low_p = df_1m['Low'].min()
-            total_vol_today = df_1m['Volume'].sum()
+            high_p, low_p = df_1m['High'].max(), df_1m['Low'].min()
             
             strategies = []
             if len(df_daily) >= 20:
-                c_today = curr_p
-                o_today = df_daily['Open'].iloc[-1]
-                h_today = df_daily['High'].iloc[-1]
-                l_today = df_daily['Low'].iloc[-1]
-                v_today = df_daily['Volume'].iloc[-1]
-                
-                c_yest = df_daily['Close'].iloc[-2]
-                o_yest = df_daily['Open'].iloc[-2]
-                h_yest = df_daily['High'].iloc[-2]
-                
-                c_prev = df_daily['Close'].iloc[-3]
-                o_prev = df_daily['Open'].iloc[-3]
-
-                ma5 = df_daily['Close'].tail(5).mean()
-                ma10 = df_daily['Close'].tail(10).mean()
-                ma20 = df_daily['Close'].tail(20).mean()
-                v_ma5 = df_daily['Volume'].tail(5).mean()
-
-                if c_today > ma5 > ma10 > ma20: strategies.append("🌈 多頭排列")
-                if v_today > v_ma5 * 2 and c_today > o_today: strategies.append("🔥 量價齊揚")
-                if (c_today > o_today) and (c_yest > o_yest) and (c_prev > o_prev) and (c_today > c_yest > c_prev): strategies.append("📈 紅三兵")
-                
-                body = abs(c_today - o_today)
-                lower_shadow = min(c_today, o_today) - l_today
-                if lower_shadow > body * 2 and body > 0: strategies.append("🔨 探底神針")
+                c_today, o_today, h_today = curr_p, df_daily['Open'].iloc[-1], df_daily['High'].iloc[-1]
+                c_yest, h_yest = df_daily['Close'].iloc[-2], df_daily['High'].iloc[-2]
+                ma5, ma20 = df_daily['Close'].tail(5).mean(), df_daily['Close'].tail(20).mean()
+                if c_today > ma5 > ma20: strategies.append("🌈 多頭排列")
                 if o_today > h_yest: strategies.append("🚀 強勢跳空")
 
-            if len(df_1m) > 30 and total_vol_today > 0:
-                tail_vol = df_1m['Volume'].tail(30).sum()
-                pos_percent = (curr_p - low_p) / (high_p - low_p + 0.0001)
-                if (tail_vol / total_vol_today) > 0.20 and pos_percent > 0.85:
-                    strategies.append("🚨 疑似隔日沖進場 (尾盤爆量)")
-
-            vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
-            
-            if len(vol_5m) > 0:
-                avg_5m = vol_5m.mean()
-                for ts, vol in vol_5m.items():
-                    if vol > avg_5m * 2.5 and vol > 100:
-                        time_str = ts.strftime("%H:%M")
-                        msg = f"[{time_str}] ⚡ {name}({code}) | 5分K爆量: {int(vol)}張"
-                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": time_str, "msg": msg})
-
             if len(vol_15m) > 0:
-                avg_15m = vol_15m.mean()
                 for ts, vol in vol_15m.items():
-                    if vol > avg_15m * 2.5 and vol > 200:
-                        time_str = ts.strftime("%H:%M")
-                        msg = f"[{time_str}] 🔥 {name}({code}) | 15分K爆量: {int(vol)}張"
-                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": time_str, "msg": msg})
+                    if vol > vol_15m.mean() * 2.5 and vol > 200:
+                        msg = f"[{ts.strftime('%H:%M')}] 🔥 {name}({code}) | 15K爆量: {int(vol)}張"
+                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": ts.strftime('%H:%M'), "msg": msg})
             
-            vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
+            vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            correlated_codes = get_correlated_stocks(code, name)
-            corr_displays = []
-            
-            for idx, c_code in enumerate(correlated_codes):
-                c_curr, c_prev, c_name = get_quick_quote(c_code)
-                if c_curr is not None and c_prev is not None and c_prev > 0:
-                    pct = ((c_curr - c_prev) / c_prev) * 100
-                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
-                    sign = "+" if pct > 0 else ""
-                    prefix = "👑 " if idx == 0 else "🔗 "
-                    corr_displays.append(f"{prefix}{c_name}: :{color}[**{c_curr:.2f} ({sign}{pct:.2f}%)**]")
-                else:
-                    corr_displays.append(f"{c_code}: 暫無數據")
+            corr_codes = get_correlated_stocks(code, name, is_us=False)
+            corr_str = " ｜ ".join([f"🔗 {c}" for c in corr_codes]) if corr_codes else ""
 
             with st.container(border=True):
-                strat_tags = " | ".join(strategies) if strategies else "觀察中"
-                st.markdown(f"#### {name}({code}) ✨ 觸發型態: **{strat_tags}**")
-                
-                if corr_displays:
-                    st.markdown(f"**族群跟漲指標**：{' ｜ '.join(corr_displays)}")
+                st.markdown(f"#### {name}({code}) ✨ 型態: **{','.join(strategies) if strategies else '觀察中'}**")
+                if corr_str: st.markdown(f"**族群跟漲指標**：{corr_str}")
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
-                c2.metric("當日均價線", f"{vwap:.2f}")
+                c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
+
+    if st.session_state.logs:
+        st.subheader("🔔 台股帶量異常歷史紀錄")
+        st.text_area("今日爆量軌跡", value="\n\n".join([l['msg'] for l in sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)]), height=150)
+
+# ====================
+# 戰區 2：美股波段戰情
+# ====================
+with tab_us:
+    if not st.session_state.us_stocks: st.info("請於左側加入美股 (波段監控看重日K與均線，無須秒級跳動)。")
+    for stock in st.session_state.us_stocks:
+        code = stock['code']
+        df_daily, _, _ = get_historical_features(code, is_us=True)
+        
+        if not df_daily.empty:
+            curr_p = df_daily['Close'].iloc[-1]
+            prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
+            ma10, ma20 = df_daily['Close'].tail(10).mean(), df_daily['Close'].tail(20).mean()
+            rsi = df_daily['RSI'].iloc[-1]
+            
+            corr_codes = get_correlated_stocks(code, code, is_us=True)
+            corr_str = " ｜ ".join([f"🔗 {c}" for c in corr_codes]) if corr_codes else ""
+
+            with st.container(border=True):
+                st.markdown(f"#### 🦅 {code} (美股)")
+                if corr_str: st.markdown(f"**美股連動指標**：{corr_str}")
                 
-                with st.expander("🔍 深度策略分析", expanded=False):
-                    d_col = "red" if curr_p > vwap else "green"
-                    st.markdown(f"⚡ **當沖建議**: :{d_col}[{'多方強勢' if curr_p > vwap else '空方強勢'}] | 參考點位: {vwap:.2f}")
-                    
-                    ma5_daily = df_daily['Close'].tail(5).mean() if len(df_daily) >= 5 else curr_p
-                    ma10_daily = df_daily['Close'].tail(10).mean() if len(df_daily) >= 10 else curr_p
-                    st.markdown(f"🌊 **波段技術支撐**: 5日線 ({ma5_daily:.2f}) / 10日線 ({ma10_daily:.2f})")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+                c2.metric("波段月線 (20MA)", f"${ma20:.2f}")
+                
+                rsi_col = "red" if rsi > 70 else "green" if rsi < 30 else "normal"
+                c3.metric("RSI (超買/超賣)", f"{rsi:.1f}", delta_color="off")
+                
+                if st.button(f"🤖 呼叫 AI 分析 {code} 華爾街動向", key=f"us_ai_{code}"):
+                    with st.spinner("調閱華爾街法人報告..."):
+                        res = ai_model.generate_content(f"請分析美股 {code} 近期產業動態、華爾街機構看法，並給出波段進場建議，100字內。").text
+                        st.success(res)
 
-                    pos = (curr_p - low_p) / (high_p - low_p + 0.001)
-                    n_msg = "📈 尾盤鎖碼 (隔日沖機率高)" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
-                    st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
-                    
-                    st.divider()
-                    
-                    if st.button(f"🤖 呼叫 AI 分析籌碼與波段進場價", key=f"ai_wave_{code}", use_container_width=True):
-                        with st.spinner(f'正在為您深度分析 {name} 的籌碼動態與合理波段...'):
-                            prompt = f"我是台股操盤手。請針對 {name}({code})，目前即時股價為 {curr_p:.2f}。請幫我分析近期『三大法人（外資/投信/自營商）可能的買賣超動態與籌碼集中度』，並綜合產業題材，給我一個『建議的波段進場價位區間』。字數請控制在100字以內，精準扼要。"
-                            try:
-                                analysis = ai_model.generate_content(prompt).text
-                                st.success(analysis)
-                            except Exception as e:
-                                st.error("AI 伺服器稍微壅塞，請稍後再試。")
-        else:
-            st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+# ====================
+# 戰區 3：10年核心資產
+# ====================
+with tab_core:
+    st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫 (10年以上視野)")
+    st.info("💡 長線投資心法：不看 1 分 K，不理會短線震盪。只要價格低於 60MA (季線) 或 RSI 進入超賣區 (<40)，就是啟動 20 萬本金分批佈局的甜甜價。")
+    
+    for asset in st.session_state.core_assets:
+        code, is_us = asset['code'], asset['is_us']
+        df_daily, _, _ = get_historical_features(code, is_us=is_us)
+        
+        if not df_daily.empty:
+            curr_p = df_daily['Close'].iloc[-1]
+            ma60 = df_daily['Close'].tail(60).mean() if len(df_daily)>=60 else curr_p
+            ma200 = df_daily['Close'].tail(200).mean() if len(df_daily)>=200 else curr_p
+            rsi = df_daily['RSI'].iloc[-1]
+            
+            # 長線進場燈號判定
+            signal = "⏳ 定期定額持倉"
+            s_color = "gray"
+            if curr_p < ma60 and rsi < 40:
+                signal = "🎯 罕見超跌！啟動 20 萬資金加碼"
+                s_color = "red"
+            elif curr_p > ma60 * 1.2:
+                signal = "🔥 乖離過大，暫停單筆買進"
+                s_color = "orange"
 
-st.divider()
-st.subheader("🔔 帶量異常歷史紀錄 (5K / 15K)")
-if st.session_state.logs:
-    sorted_logs = sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)
-    log_text = "\n\n".join([l['msg'] for l in sorted_logs])
-    st.text_area("今日爆量軌跡", value=log_text, height=200)
-else:
-    st.info("目前無異常爆量訊號。系統持續監控中...")
+            with st.container(border=True):
+                c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1.5])
+                icon = "🇺🇸" if is_us else "🇹🇼"
+                c1.markdown(f"**{icon} {code}**\n\n現價: {curr_p:.2f}")
+                c2.metric("季線 (60MA)", f"{ma60:.2f}")
+                c3.metric("年線 (200MA)", f"{ma200:.2f}")
+                c4.markdown(f"**佈局燈號**\n\n:{s_color}[{signal}] (RSI: {rsi:.1f})")
 
+# 引擎循環控制
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
