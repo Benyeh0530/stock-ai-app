@@ -174,8 +174,8 @@ if 'logs' not in st.session_state: st.session_state.logs = []
 # 預設植入 10 年期 20 萬本金計畫的核心標的
 if 'core_assets' not in st.session_state: 
     st.session_state.core_assets = [
-        {"code": "0050", "is_us": False}, {"code": "00891", "is_us": False},
-        {"code": "QQQ", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
+        {"code": "0050", "is_us": False}, {"code": "009816", "is_us": False},
+        {"code": "QQQM", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
     ]
 
 all_stocks = get_full_stock_db()
@@ -393,3 +393,4 @@ with tab_core:
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
+
