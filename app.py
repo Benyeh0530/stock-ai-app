@@ -89,7 +89,6 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 🚀 將 Prompt 改為嚴格的 JSON 數據結構要求
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
     請嚴格依照以下 JSON 格式回傳一份實戰選股報告。不要包含任何 markdown 語法 (如 ```json) 或其他解釋文字，只能輸出純 JSON。
@@ -116,7 +115,6 @@ def get_advanced_ai_report():
 
     try:
         response = ai_model.generate_content(prompt).text
-        # 自動清理 AI 可能多加的 markdown 標記
         match = re.search(r'\{.*\}', response, re.DOTALL)
         json_str = match.group(0) if match else response
         return json.loads(json_str)
@@ -162,7 +160,7 @@ with st.sidebar:
         st.session_state.logs = [] 
         st.rerun()
 
-# --- 🚀 全新結構化報告載入區 ---
+# --- 報告載入區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算並建立選股資料庫 (約需 10~20 秒)...")
     with st.spinner('過濾 150 元以下標的...'):
@@ -177,7 +175,6 @@ elif getattr(st.session_state, 'ai_report', None):
         if "error" in report_data:
             st.error(report_data["error"])
         else:
-            # 建立四個分類的頁籤 (Tabs)，在手機上滑動超方便
             tabs = st.tabs(list(report_data.keys()))
             
             for i, (category, stocks) in enumerate(report_data.items()):
@@ -186,11 +183,9 @@ elif getattr(st.session_state, 'ai_report', None):
                         st.info("時間未達或目前無符合條件的標的。")
                     
                     for stock in stocks:
-                        # 將每檔股票變成可點擊展開的手風琴 (Expander)
                         with st.expander(f"🎯 {stock['name']} ({stock['code']}) | 參考價: {stock.get('price', '--')}"):
                             st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
                             
-                            # ✨ 魔法按鈕：直接從報告加入即時監控
                             if st.button(f"➕ 加入 {stock['name']} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
                                 if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
                                     st.session_state.stocks.append({"code": stock['code'], "name": stock['name']})
@@ -259,16 +254,30 @@ else:
                 c2.metric("當日均價線", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
+                # --- 🚀 全新的深度策略分析區塊 (加入專屬 AI 按鈕) ---
                 with st.expander("🔍 深度策略分析", expanded=False):
                     d_col = "red" if curr_p > vwap else "green"
                     st.markdown(f"⚡ **當沖建議**: :{d_col}[{'多方強勢' if curr_p > vwap else '空方強勢'}] | 參考點位: {vwap:.2f}")
                     
-                    trend_col = "red" if curr_p > ma20_15k else "green"
-                    st.markdown(f"🌊 **短波段趨勢 (15K)**: :{trend_col}[{'站上 20MA 偏多' if curr_p > ma20_15k else '跌破 20MA 偏空'}]")
+                    ma5_daily = df_daily['Close'].tail(5).mean() if len(df_daily) >= 5 else curr_p
+                    ma10_daily = df_daily['Close'].tail(10).mean() if len(df_daily) >= 10 else curr_p
+                    st.markdown(f"🌊 **波段技術支撐**: 5日線 ({ma5_daily:.2f}) / 10日線 ({ma10_daily:.2f})")
 
                     pos = (curr_p - low_p) / (high_p - low_p + 0.001)
                     n_msg = "📈 尾盤鎖碼" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
+                    
+                    st.divider()
+                    
+                    # 🤖 專屬 AI 波段分析召喚按鈕
+                    if st.button(f"🤖 呼叫 AI 分析波段進場價", key=f"ai_wave_{code}", use_container_width=True):
+                        with st.spinner(f'正在為您深度分析 {name} 的合理波段價位...'):
+                            prompt = f"我是台股操盤手。請針對 {name}({code})，目前即時股價為 {curr_p:.2f}。請拋棄死板的均線，用你對這檔股票產業與近期市場動態的了解，明確給我一個『建議的波段進場價位區間』與『看多或看空的理由』。字數請控制在100字以內，精準扼要。"
+                            try:
+                                analysis = ai_model.generate_content(prompt).text
+                                st.success(analysis)
+                            except Exception as e:
+                                st.error("AI 伺服器稍微壅塞，請稍後再試。")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
 
