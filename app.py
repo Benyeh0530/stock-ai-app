@@ -15,8 +15,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    # 使用 gemini-1.5-pro 可以獲得更深度的產業與法人分析，若跑太慢可改回 flash
-    ai_model = genai.GenerativeModel('gemini-1.5-flash')
+    # 更改為新版或最穩定的通用模型
+    ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 2. 核心數據引擎 ---
 @st.cache_data(ttl=3600)
@@ -184,3 +184,4 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
