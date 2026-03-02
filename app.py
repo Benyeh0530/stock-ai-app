@@ -29,25 +29,31 @@ def get_full_stock_db():
         for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
     except: pass
     return db
+    
 @st.cache_data(ttl=10)
 def get_stock_data(code):
     try:
         suffix = ".TW" if len(code) == 4 else ".TWO"
         
-        # --- 🚀 核心破解：偽裝成 Windows 電腦的 Chrome 瀏覽器 ---
         session = requests.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         })
         
-        # 將偽裝的 session 塞給 yfinance
         ticker = yf.Ticker(f"{code}{suffix}", session=session)
-        df_1m = ticker.history(period="1d", interval="1m")
+        
+        # 🚀 關鍵破解：將 1d 改為 5d，避開主機時區錯亂導致的空資料
+        df_1m = ticker.history(period="5d", interval="1m")
         df_daily = ticker.history(period="1mo", interval="1d")
+        
+        # 確保有抓到資料後，手動只裁切出「最新那一天」的 1K 線
+        if df_1m is not None and not df_1m.empty:
+            last_day = df_1m.index[-1].date()
+            df_1m = df_1m[df_1m.index.date == last_day]
+            
         return df_1m, df_daily
     except Exception as e:
-        # 如果還是失敗，把錯誤印出來讓我們知道死在哪裡
-        print(f"抓取 {code} 失敗: {e}") 
+        print(f"抓取失敗: {e}")
         return None, None
 
 # 🚀 全新強大的 AI 投顧選股引擎
@@ -193,5 +199,6 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
 
 
