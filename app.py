@@ -117,16 +117,17 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 🚀 關鍵升級：強硬規定當沖標的必須具備高震幅
+    # 🚀 關鍵升級：強制加入【多空絕對互斥】與【不重複選股】鐵令
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
     請給出你認為勝率最高的「絕對 TOP 5」精選名單。請嚴格依照以下 JSON 格式回傳，不可有其他多餘文字。
     
-    【絕對限制條件】：
+    【絕對限制條件 - 違反將導致系統崩潰】：
     1. 所有推薦股票目前股價必須在 150 元（含）以下！
     2. 每一個類別，必須精準提供剛好 5 檔股票！
-    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱」。
-    4. 【當沖震幅鐵令】：在「當沖作多」與「當沖作空」的選股中，必須挑選近期具備高周轉率，且「日震幅通常大於 5%」的熱門活躍股，絕對排除走勢溫吞的牛皮股！
+    3. 【名單絕對互斥】：這 4 個分類總共 20 檔股票，「絕對不可以有任何一檔股票重複」！作多的名單絕對不能出現在作空名單裡，波段名單也不能跟當沖名單重複！
+    4. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱」。
+    5. 【當沖震幅鐵令】：在「當沖作多」與「當沖作空」的選股中，必須挑選近期具備高周轉率，且「日震幅通常大於 5%」的熱門活躍股，絕對排除走勢溫吞的牛皮股！
 
     JSON 格式如下：
     {{
@@ -203,7 +204,7 @@ with st.sidebar:
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算 TOP 5 精選清單 (約需 10~20 秒)...")
-    with st.spinner('過濾低波動牛皮股，鎖定高震幅當沖標的...'):
+    with st.spinner('建立多空互斥防線，篩選不重複的高勝率標的...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
