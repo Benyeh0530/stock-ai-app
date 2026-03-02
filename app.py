@@ -95,7 +95,7 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 🚀 提示詞終極進化：新增資金熱點產業分析
+    # 🚀 升級：強制 AI 判斷隔日沖券商與主力進出跡象
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
     請給出你認為勝率最高的「絕對 TOP 5」精選名單。請嚴格依照以下 JSON 格式回傳，不可有其他多餘文字。
@@ -103,7 +103,8 @@ def get_advanced_ai_report():
     【絕對限制條件】：
     1. 所有推薦股票目前股價必須在 150 元（含）以下！
     2. 每一個類別，必須精準提供剛好 5 檔股票！
-    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱 (如: 散熱模組、重電族群、CPO等)」。
+    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。
+    4. 針對「隔日沖」名單，請務必分析是否有『常見隔日沖主力券商 (如凱基台北、富邦建國、元大土城永寧等)』進駐的跡象或尾盤鎖碼意圖。
 
     JSON 格式如下：
     {{
@@ -114,7 +115,7 @@ def get_advanced_ai_report():
       "隔日沖": [ 5筆資料 ]
     }}
     
-    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準或所屬熱門產業", "reason": "詳細理由分析(若是資金熱點，請說明資金流入該產業的原因與個股優勢)"}})
+    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "詳細理由分析"}})
     """
     if not is_after_1230:
         prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
@@ -129,7 +130,7 @@ def get_advanced_ai_report():
         return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
 # --- 3. 網頁介面 ---
-st.title("⚡ AI 智能監控戰情室")
+st.title("⚡ AI 智能監控戰情室 (含隔日沖偵測)")
 
 if 'stocks' not in st.session_state: st.session_state.stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
@@ -164,7 +165,7 @@ with st.sidebar:
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算 TOP 5 精選清單 (約需 10~20 秒)...")
-    with st.spinner('掃描近期熱門產業與資金動向，篩選最優質個股...'):
+    with st.spinner('掃描隔日沖主力動向與資金熱點...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
@@ -221,6 +222,7 @@ else:
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             high_p = df_1m['High'].max()
             low_p = df_1m['Low'].min()
+            total_vol_today = df_1m['Volume'].sum()
             
             strategies = []
             if len(df_daily) >= 20:
@@ -250,6 +252,15 @@ else:
                 lower_shadow = min(c_today, o_today) - l_today
                 if lower_shadow > body * 2 and body > 0: strategies.append("🔨 探底神針")
                 if o_today > h_yest: strategies.append("🚀 強勢跳空")
+
+            # --- 🚀 全新隔日沖主力足跡偵測 (演算法) ---
+            # 條件：最後 30 分鐘成交量佔全天 20% 以上，且收盤價位處於全天最高點的 85% 以上區間
+            if len(df_1m) > 30 and total_vol_today > 0:
+                tail_vol = df_1m['Volume'].tail(30).sum()
+                pos_percent = (curr_p - low_p) / (high_p - low_p + 0.0001)
+                
+                if (tail_vol / total_vol_today) > 0.20 and pos_percent > 0.85:
+                    strategies.append("🚨 疑似隔日沖進場 (尾盤爆量)")
 
             vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
@@ -290,7 +301,7 @@ else:
                     st.markdown(f"🌊 **波段技術支撐**: 5日線 ({ma5_daily:.2f}) / 10日線 ({ma10_daily:.2f})")
 
                     pos = (curr_p - low_p) / (high_p - low_p + 0.001)
-                    n_msg = "📈 尾盤鎖碼" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
+                    n_msg = "📈 尾盤鎖碼 (隔日沖機率高)" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
                     
                     st.divider()
