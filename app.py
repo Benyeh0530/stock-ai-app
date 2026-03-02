@@ -103,7 +103,6 @@ def get_realtime_tick(code, suffix):
         }, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 恢復：專屬極速報價引擎 (用於連動股)
 @st.cache_data(ttl=5)
 def get_quick_quote(code, is_us=False):
     stock_db = get_full_stock_db()
@@ -129,6 +128,7 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    # 🚀 升級提示詞：鎖定美股短波段分析，著重催化劑與技術突破
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖跨國操盤手。
     請嚴格依照以下 JSON 格式回傳一份實戰選股報告。
@@ -136,11 +136,13 @@ def get_advanced_ai_report():
     【絕對限制】：
     1. 台股推薦價格必須在 150 元以下。美股則無價格限制。
     2. 每一個類別，精準提供 5 檔股票。各分類間名單絕對互斥不重複。
-    3. 必須在 strategy 填寫判斷基準。當沖必須找近期高震幅(>5%)標的。
+    3. 必須在 strategy 填寫判斷基準。
+       - 台股當沖：必須找近期高震幅(>5%)的熱門活躍股。
+       - 美股短波分析：請著重於「近期具有催化劑(財報/消息)」或「技術面即將突破/創高」的強勢股。
 
     JSON 格式如下：
     {{
-      "美股波段作多": [ 5筆資料 (美股代碼如 AAPL, TSLA) ],
+      "美股短波分析": [ 5筆資料 (純美股代碼如 NVDA, TSLA) ],
       "資金熱點TOP5": [ 5筆台股資料 ],
       "台股當沖作多": [ 5筆台股資料 ],
       "台股當沖作空": [ 5筆台股資料 ]
@@ -171,8 +173,9 @@ if 'us_stocks' not in st.session_state: st.session_state.us_stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'core_assets' not in st.session_state: 
     st.session_state.core_assets = [
-        {"code": "0050", "is_us": False}, {"code": "00891", "is_us": False},
-        {"code": "QQQ", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
+        {"code": "0050", "is_us": False}, 
+        {"code": "009816", "is_us": False},
+        {"code": "QQQM", "is_us": True}
     ]
 
 all_stocks = get_full_stock_db()
@@ -231,6 +234,7 @@ with st.sidebar:
         st.session_state.tw_stocks = []
         st.session_state.us_stocks = []
         st.session_state.logs = [] 
+        st.session_state.pop('core_assets', None)
         st.rerun()
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
@@ -253,6 +257,7 @@ elif getattr(st.session_state, 'ai_report', None):
                             display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '')}"
                             with st.expander(display_title):
                                 st.write(f"**詳細分析**：\n{stock.get('reason', '')}")
+                                # 自動判定是否為美股清單，讓加入按鈕送到正確的頁籤
                                 is_us_cat = "美股" in category
                                 if 'code' in stock and st.button(f"➕ 加入看板", key=f"add_{category}_{stock['code']}"):
                                     target_list = st.session_state.us_stocks if is_us_cat else st.session_state.tw_stocks
@@ -297,7 +302,6 @@ with tab_tw:
             
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 恢復：台股連動股即時報價迴圈
             corr_codes = get_correlated_stocks(code, name, is_us=False)
             corr_displays = []
             for idx, c_code in enumerate(corr_codes):
@@ -315,7 +319,6 @@ with tab_tw:
             with st.container(border=True):
                 st.markdown(f"#### {name}({code}) ✨ 型態: **{','.join(strategies) if strategies else '觀察中'}**")
                 
-                # 在介面上顯示帶有紅綠漲幅的連動股
                 if corr_str: st.markdown(f"**族群跟漲指標**：{corr_str}")
                 
                 c1, c2, c3 = st.columns(3)
@@ -342,7 +345,6 @@ with tab_us:
             ma10, ma20 = df_daily['Close'].tail(10).mean(), df_daily['Close'].tail(20).mean()
             rsi = df_daily['RSI'].iloc[-1]
             
-            # 🚀 恢復：美股連動股即時報價迴圈 (美股習慣是綠漲紅跌，但為了與台股介面統一防混淆，這裡同樣使用紅漲綠跌顯示)
             corr_codes = get_correlated_stocks(code, code, is_us=True)
             corr_displays = []
             for idx, c_code in enumerate(corr_codes):
@@ -360,7 +362,6 @@ with tab_us:
             with st.container(border=True):
                 st.markdown(f"#### 🦅 {code} (美股)")
                 
-                # 在介面上顯示帶有紅綠漲幅的美股連動股
                 if corr_str: st.markdown(f"**美股連動指標**：{corr_str}")
                 
                 c1, c2, c3 = st.columns(3)
