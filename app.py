@@ -65,7 +65,6 @@ def get_stock_data(code):
             last_day = df_1m_all.index[-1].date()
             df_1m_today = df_1m_all[df_1m_all.index.date == last_day]
 
-            # 🚀 為了計算 K 線型態，將抓取範圍擴大為 3 個月，並抓取 O, H, L, C, V
             url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=3mo"
             res_1d = requests.get(url_1d, headers=headers, timeout=5)
             data_1d = res_1d.json()
@@ -96,29 +95,33 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    # 🚀 提示詞終極進化：新增資金熱點產業分析
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
-    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。
+    請給出你認為勝率最高的「絕對 TOP 5」精選名單。請嚴格依照以下 JSON 格式回傳，不可有其他多餘文字。
     
-    【絕對限制條件 - 違反將導致系統崩潰】：
+    【絕對限制條件】：
     1. 所有推薦股票目前股價必須在 150 元（含）以下！
-    2. 每一個類別（陣列），必須「嚴格且精準地提供剛好 5 檔」股票！
+    2. 每一個類別，必須精準提供剛好 5 檔股票！
+    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱 (如: 散熱模組、重電族群、CPO等)」。
 
     JSON 格式如下：
     {{
-      "當沖作多": [ 必須填入剛好 5 筆資料 ],
-      "當沖作空": [ 必須填入剛好 5 筆資料 ],
-      "波段操作": [ 必須填入剛好 5 筆資料 ],
-      "隔日沖": [ 必須填入剛好 5 筆資料 ]
+      "資金熱點TOP5": [ 5筆資料 ],
+      "當沖作多": [ 5筆資料 ],
+      "當沖作空": [ 5筆資料 ],
+      "波段操作": [ 5筆資料 ],
+      "隔日沖": [ 5筆資料 ]
     }}
     
-    (陣列內的每一個物件格式必須為：{{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "詳細看多/看空/波段/鎖碼的理由。若為波段操作，請特別點出三大法人買賣超狀況與產業題材。"}})
+    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準或所屬熱門產業", "reason": "詳細理由分析(若是資金熱點，請說明資金流入該產業的原因與個股優勢)"}})
     """
     if not is_after_1230:
         prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
 
     try:
-        response = ai_model.generate_content(prompt).text
+        generation_config = genai.types.GenerationConfig(temperature=0.0)
+        response = ai_model.generate_content(prompt, generation_config=generation_config).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
         json_str = match.group(0) if match else response
         return json.loads(json_str)
@@ -126,14 +129,13 @@ def get_advanced_ai_report():
         return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
 # --- 3. 網頁介面 ---
-st.title("⚡ AI 智能監控戰情室 (含策略型態掃描)")
+st.title("⚡ AI 智能監控戰情室")
 
 if 'stocks' not in st.session_state: st.session_state.stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
 
 all_stocks = get_full_stock_db()
 
-# --- 側邊欄 ---
 with st.sidebar:
     st.header("🤖 AI 獨家選股報告")
     if st.button("🚀 立即生成全盤選股報告", use_container_width=True, type="primary"):
@@ -144,11 +146,7 @@ with st.sidebar:
     
     st.header("🎯 自訂監控選單")
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
-    selected_stock = st.selectbox(
-        "🔍 支援代碼或中文字搜尋", 
-        options=["請點此搜尋..."] + stock_list,
-        index=0
-    )
+    selected_stock = st.selectbox("🔍 支援代碼或中文字搜尋", options=["請點此搜尋..."] + stock_list, index=0)
     
     if st.button("➕ 加入即時監控"):
         if selected_stock and selected_stock != "請點此搜尋...":
@@ -164,10 +162,9 @@ with st.sidebar:
         st.session_state.logs = [] 
         st.rerun()
 
-# --- 報告載入區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
-    st.subheader("🤖 AI 正在深度運算並建立選股資料庫 (約需 10~20 秒)...")
-    with st.spinner('確保各分類精準挑選 5 檔標的，並分析籌碼狀況...'):
+    st.subheader("🤖 AI 正在深度運算 TOP 5 精選清單 (約需 10~20 秒)...")
+    with st.spinner('掃描近期熱門產業與資金動向，篩選最優質個股...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
@@ -181,10 +178,13 @@ elif getattr(st.session_state, 'ai_report', None):
             tabs = st.tabs(list(report_data.keys()))
             for i, (category, stocks) in enumerate(report_data.items()):
                 with tabs[i]:
-                    if not stocks: st.info("時間未達或目前無符合條件的標的。")
+                    if not stocks: 
+                        st.info("時間未達或目前無符合條件的標的。")
                     else:
                         for stock in stocks:
-                            with st.expander(f"🎯 {stock.get('name', '未知')} ({stock.get('code', '----')}) | 參考價: {stock.get('price', '--')}"):
+                            display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '綜合評估')}"
+                            
+                            with st.expander(display_title):
                                 st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
                                 if 'code' in stock and st.button(f"➕ 加入 {stock.get('name', '該檔')} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
                                     if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
@@ -197,7 +197,6 @@ elif getattr(st.session_state, 'ai_report', None):
 
 st.divider()
 
-# --- 頂端控制區 ---
 t_col1, t_col2 = st.columns([1, 1])
 with t_col1:
     if st.button("🔄 手動刷新即時股價"):
@@ -207,7 +206,6 @@ with t_col2:
     tw_tz = pytz.timezone('Asia/Taipei')
     st.write(f"⏱️ 股價更新時間: {datetime.datetime.now(tw_tz).strftime('%H:%M:%S')}")
 
-# --- 主戰情看板 ---
 st.subheader("📺 即時戰情看板")
 if not st.session_state.stocks:
     st.info("請於左側選單搜尋並加入您想監控的標的。")
@@ -224,10 +222,8 @@ else:
             high_p = df_1m['High'].max()
             low_p = df_1m['Low'].min()
             
-            # --- 🚀 策略 K 線引擎：即時運算多空型態 ---
             strategies = []
             if len(df_daily) >= 20:
-                # 取得近期每日資料
                 c_today = curr_p
                 o_today = df_daily['Open'].iloc[-1]
                 h_today = df_daily['High'].iloc[-1]
@@ -241,36 +237,20 @@ else:
                 c_prev = df_daily['Close'].iloc[-3]
                 o_prev = df_daily['Open'].iloc[-3]
 
-                # 計算日均線
                 ma5 = df_daily['Close'].tail(5).mean()
                 ma10 = df_daily['Close'].tail(10).mean()
                 ma20 = df_daily['Close'].tail(20).mean()
                 v_ma5 = df_daily['Volume'].tail(5).mean()
 
-                # 策略 1: 均線多頭排列
-                if c_today > ma5 > ma10 > ma20:
-                    strategies.append("🌈 多頭排列")
+                if c_today > ma5 > ma10 > ma20: strategies.append("🌈 多頭排列")
+                if v_today > v_ma5 * 2 and c_today > o_today: strategies.append("🔥 量價齊揚")
+                if (c_today > o_today) and (c_yest > o_yest) and (c_prev > o_prev) and (c_today > c_yest > c_prev): strategies.append("📈 紅三兵")
                 
-                # 策略 2: 量價齊揚 (今日量大於5日均量2倍，且收紅)
-                if v_today > v_ma5 * 2 and c_today > o_today:
-                    strategies.append("🔥 量價齊揚")
-
-                # 策略 3: 紅三兵 (連三紅，且收盤價創新高)
-                if (c_today > o_today) and (c_yest > o_yest) and (c_prev > o_prev):
-                    if c_today > c_yest > c_prev:
-                        strategies.append("📈 紅三兵")
-
-                # 策略 4: 下影線打底 (下影線長度 > 實體K線2倍)
                 body = abs(c_today - o_today)
                 lower_shadow = min(c_today, o_today) - l_today
-                if lower_shadow > body * 2 and body > 0:
-                    strategies.append("🔨 探底神針")
-                    
-                # 策略 5: 強勢跳空 (今日開盤直接越過昨日最高)
-                if o_today > h_yest:
-                    strategies.append("🚀 強勢跳空")
+                if lower_shadow > body * 2 and body > 0: strategies.append("🔨 探底神針")
+                if o_today > h_yest: strategies.append("🚀 強勢跳空")
 
-            # 爆量紀錄
             vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
             
@@ -293,7 +273,6 @@ else:
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
             
             with st.container(border=True):
-                # 如果有觸發策略，在股票名稱旁邊顯示標籤
                 strat_tags = " | ".join(strategies) if strategies else "觀察中"
                 st.markdown(f"#### {name}({code}) ✨ 觸發型態: **{strat_tags}**")
                 
