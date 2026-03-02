@@ -32,45 +32,31 @@ def get_full_stock_db():
     
 @st.cache_data(ttl=10)
 def get_stock_data(code):
-    try:
-        suffix = ".TW" if len(code) == 4 else ".TWO"
-        # 偽裝成 Mac 筆電的正常瀏覽器連線
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
-        
-        # --- 1. 直接爬取 Yahoo 底層 1K JSON 資料 ---
-        url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d"
-        res_1m = requests.get(url_1m, headers=headers, timeout=5).json()
-        
-        df_1m = pd.DataFrame()
-        if res_1m.get('chart', {}).get('result'):
-            result = res_1m['chart']['result'][0]
-            if 'timestamp' in result:
-                # 自動校正為台灣時間
-                idx = pd.to_datetime(result['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
-                quote = result['indicators']['quote'][0]
-                df_1m = pd.DataFrame({
-                    'High': quote['high'], 
-                    'Low': quote['low'], 
-                    'Close': quote['close'], 
-                    'Volume': quote['volume']
-                }, index=idx).dropna()
-
-        # --- 2. 直接爬取 Yahoo 底層 日K JSON 資料 ---
-        url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d"
-        res_1d = requests.get(url_1d, headers=headers, timeout=5).json()
-        
-        df_daily = pd.DataFrame()
-        if res_1d.get('chart', {}).get('result'):
-            result = res_1d['chart']['result'][0]
-            if 'timestamp' in result:
-                quote = result['indicators']['quote'][0]
-                df_daily = pd.DataFrame({'Close': quote['close']}).dropna()
-
-        return df_1m, df_daily
-        
-    except Exception as e:
-        # 靜默處理錯誤，避免畫面崩潰
-        return None, None
+    # 建立偽裝真人瀏覽器連線
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    })
+    
+    # 🚀 終極破解：不再瞎猜！自動輪流嘗試 上市(.TW) 與 上櫃(.TWO)
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = yf.Ticker(f"{code}{suffix}", session=session)
+            # 一樣抓 5 天防時區 Bug
+            df_1m = ticker.history(period="5d", interval="1m")
+            df_daily = ticker.history(period="1mo", interval="1d")
+            
+            # 如果這個後綴成功抓到資料，就進行處理並回傳
+            if df_1m is not None and not df_1m.empty:
+                last_day = df_1m.index[-1].date()
+                df_1m = df_1m[df_1m.index.date == last_day]
+                return df_1m, df_daily
+        except:
+            # 如果失敗 (例如拿 8183.TW 去查)，就安靜地換下一個 (.TWO) 繼續試
+            continue 
+            
+    # 真的兩個都找不到，才宣告失敗
+    return None, None
 
 # 🚀 全新強大的 AI 投顧選股引擎
 def get_advanced_ai_report():
@@ -215,6 +201,7 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
 
 
 
