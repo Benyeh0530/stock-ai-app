@@ -21,7 +21,7 @@ if API_KEY:
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 2. 核心數據引擎 ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400) # 靜態清單：快取 1 天
 def get_full_stock_db():
     db = {}
     try:
@@ -32,7 +32,7 @@ def get_full_stock_db():
     except: pass
     return db
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60) # 大盤溫度計：快取 1 分鐘即可
 def get_market_temp():
     headers = {"User-Agent": "Mozilla/5.0"}
     indices = {'^TWII': '台股加權', '^IXIC': '那斯達克'}
@@ -50,7 +50,7 @@ def get_market_temp():
         except: pass
     return results
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=900) # 波段/長線歷史日K：快取 15 分鐘
 def get_historical_features(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
@@ -71,7 +71,7 @@ def get_historical_features(code, is_us=False):
             delta = df_daily['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
+            rs = gain / (loss + 1e-9)
             df_daily['RSI'] = 100 - (100 / (1 + rs))
 
             ma20_15k = None
@@ -88,6 +88,7 @@ def get_historical_features(code, is_us=False):
             continue
     return pd.DataFrame(), None, ""
 
+# ⚡ 當沖生命線 1：極速秒級引擎 (🔥 無快取，每次強制抓取最新 1 分 K)
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -103,7 +104,8 @@ def get_realtime_tick(code, suffix):
         }, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=5)
+# ⚡ 當沖生命線 2：連動股專屬極速報價 (快取3秒，配合自動更新頻率，確保即時跳動)
+@st.cache_data(ttl=3) 
 def get_quick_quote(code, is_us=False):
     stock_db = get_full_stock_db()
     name = code if is_us else stock_db.get(code, code)
@@ -121,31 +123,22 @@ def get_quick_quote(code, is_us=False):
         except: continue
     return None, None, name
 
+# --- 🚀 優雅降級：AI 選股報告防當機 ---
 def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
     now = datetime.datetime.now(tw_tz)
-    is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 🚀 升級提示詞：鎖定美股短波段分析，著重催化劑與技術突破
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖跨國操盤手。
-    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。
-    
-    【絕對限制】：
-    1. 台股推薦價格必須在 150 元以下。美股則無價格限制。
-    2. 每一個類別，精準提供 5 檔股票。各分類間名單絕對互斥不重複。
-    3. 必須在 strategy 填寫判斷基準。
-       - 台股當沖：必須找近期高震幅(>5%)的熱門活躍股。
-       - 美股短波分析：請著重於「近期具有催化劑(財報/消息)」或「技術面即將突破/創高」的強勢股。
-
+    請嚴格依照 JSON 格式回傳實戰選股報告。台股限150元以下。各類別精準提供5檔且絕不重複。
     JSON 格式如下：
     {{
-      "美股短波分析": [ 5筆資料 (純美股代碼如 NVDA, TSLA) ],
+      "美股短波分析": [ 5筆資料 (美股代碼) ],
       "資金熱點TOP5": [ 5筆台股資料 ],
-      "台股當沖作多": [ 5筆台股資料 ],
-      "台股當沖作空": [ 5筆台股資料 ]
+      "台股當沖作多": [ 5筆台股資料 (需高震幅) ],
+      "台股當沖作空": [ 5筆台股資料 (需高震幅) ]
     }}
     (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "理由"}})
     """
@@ -153,8 +146,12 @@ def get_advanced_ai_report():
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
         return json.loads(match.group(0) if match else response)
-    except Exception as e: return {"error": f"AI 產出錯誤: {e}"}
+    except Exception as e:
+        if "429" in str(e):
+            return {"error": "🚨 Google API 免費額度已達上限。請稍後再試，或暫時專注於下方即時當沖看板（不受影響）。"}
+        return {"error": f"AI 產出錯誤: {e}"}
 
+# 🚀 AI 連動名單生成 (持久化快取：找代碼只要找一次就好，節省額度)
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
@@ -192,12 +189,9 @@ with col_t2:
         st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{val:.2f}", f"{pct:.2f}%", delta_color="normal" if pct > 0 else "inverse")
 with col_t3:
     tw_pct = market_temp.get('台股加權', (0,0))[1]
-    if tw_pct < -1.5:
-        st.error("🚨 警告：今日大盤重挫逆風，當沖請縮小部位，嚴控風險！")
-    elif tw_pct > 1.0:
-        st.success("🔥 大盤順風：多方動能強勁，可積極尋找突破口。")
-    else:
-        st.info("⚖️ 大盤震盪：請密切關注族群輪動與個股籌碼。")
+    if tw_pct < -1.5: st.error("🚨 警告：今日大盤重挫，當沖請縮小部位！")
+    elif tw_pct > 1.0: st.success("🔥 大盤順風：多方動能強勁。")
+    else: st.info("⚖️ 大盤震盪：請密切關注族群輪動。")
 
 st.divider()
 
@@ -239,7 +233,7 @@ with st.sidebar:
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算跨國 TOP 5 精選清單...")
-    with st.spinner('建立多空互斥防線，掃描全球資金動向...'):
+    with st.spinner('掃描全球資金動向...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
@@ -257,7 +251,6 @@ elif getattr(st.session_state, 'ai_report', None):
                             display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '')}"
                             with st.expander(display_title):
                                 st.write(f"**詳細分析**：\n{stock.get('reason', '')}")
-                                # 自動判定是否為美股清單，讓加入按鈕送到正確的頁籤
                                 is_us_cat = "美股" in category
                                 if 'code' in stock and st.button(f"➕ 加入看板", key=f"add_{category}_{stock['code']}"):
                                     target_list = st.session_state.us_stocks if is_us_cat else st.session_state.tw_stocks
@@ -268,10 +261,10 @@ elif getattr(st.session_state, 'ai_report', None):
             st.session_state.ai_report = None
             st.rerun()
 
-tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線 (20萬本金計畫)"])
+tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
 
 # ====================
-# 戰區 1：台股極速當沖
+# 戰區 1：台股極速當沖 (完全恢復即時 UI 介面)
 # ====================
 with tab_tw:
     if not st.session_state.tw_stocks: st.info("請於左側加入台股。")
@@ -284,6 +277,7 @@ with tab_tw:
             curr_p = df_1m['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             high_p, low_p = df_1m['High'].max(), df_1m['Low'].min()
+            total_vol_today = df_1m['Volume'].sum()
             
             strategies = []
             if len(df_daily) >= 20:
@@ -293,6 +287,12 @@ with tab_tw:
                 if c_today > ma5 > ma20: strategies.append("🌈 多頭排列")
                 if o_today > h_yest: strategies.append("🚀 強勢跳空")
 
+            if len(df_1m) > 30 and total_vol_today > 0:
+                tail_vol = df_1m['Volume'].tail(30).sum()
+                pos_percent = (curr_p - low_p) / (high_p - low_p + 0.0001)
+                if (tail_vol / total_vol_today) > 0.20 and pos_percent > 0.85:
+                    strategies.append("🚨 疑似隔日沖進場 (尾盤爆量)")
+
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
             if len(vol_15m) > 0:
                 for ts, vol in vol_15m.items():
@@ -300,8 +300,10 @@ with tab_tw:
                         msg = f"[{ts.strftime('%H:%M')}] 🔥 {name}({code}) | 15K爆量: {int(vol)}張"
                         if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": ts.strftime('%H:%M'), "msg": msg})
             
+            # 🔥 極速即時 VWAP 運算
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
+            # 🔥 極速連動股報價跳動 (3秒快取)
             corr_codes = get_correlated_stocks(code, name, is_us=False)
             corr_displays = []
             for idx, c_code in enumerate(corr_codes):
@@ -316,8 +318,10 @@ with tab_tw:
                     corr_displays.append(f"🔗 {c_code}: 載入中")
             corr_str = " ｜ ".join(corr_displays) if corr_displays else ""
 
+            # --- 完整 UI 卡片渲染 ---
             with st.container(border=True):
-                st.markdown(f"#### {name}({code}) ✨ 型態: **{','.join(strategies) if strategies else '觀察中'}**")
+                strat_tags = " | ".join(strategies) if strategies else "觀察中"
+                st.markdown(f"#### {name}({code}) ✨ 型態: **{strat_tags}**")
                 
                 if corr_str: st.markdown(f"**族群跟漲指標**：{corr_str}")
                 
@@ -325,13 +329,25 @@ with tab_tw:
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
+                
+                with st.expander("🔍 當沖深度策略分析", expanded=False):
+                    d_col = "red" if curr_p > vwap else "green"
+                    st.markdown(f"⚡ **當沖建議**: :{d_col}[{'多方強勢' if curr_p > vwap else '空方強勢'}] | 參考點位: {vwap:.2f}")
+                    
+                    ma5_daily = df_daily['Close'].tail(5).mean() if len(df_daily) >= 5 else curr_p
+                    ma10_daily = df_daily['Close'].tail(10).mean() if len(df_daily) >= 10 else curr_p
+                    st.markdown(f"🌊 **波段技術支撐**: 5日線 ({ma5_daily:.2f}) / 10日線 ({ma10_daily:.2f})")
+
+                    pos = (curr_p - low_p) / (high_p - low_p + 0.001)
+                    n_msg = "📈 尾盤鎖碼 (隔日沖機率高)" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
+                    st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
 
     if st.session_state.logs:
         st.subheader("🔔 台股帶量異常歷史紀錄")
         st.text_area("今日爆量軌跡", value="\n\n".join([l['msg'] for l in sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)]), height=150)
 
 # ====================
-# 戰區 2：美股波段戰情
+# 戰區 2：美股波段戰情 (完整恢復)
 # ====================
 with tab_us:
     if not st.session_state.us_stocks: st.info("請於左側加入美股 (波段監控看重日K與均線，無須秒級跳動)。")
@@ -373,8 +389,11 @@ with tab_us:
                 
                 if st.button(f"🤖 呼叫 AI 分析 {code} 華爾街動向", key=f"us_ai_{code}"):
                     with st.spinner("調閱華爾街法人報告..."):
-                        res = ai_model.generate_content(f"請分析美股 {code} 近期產業動態、華爾街機構看法，並給出波段進場建議，100字內。").text
-                        st.success(res)
+                        try:
+                            res = ai_model.generate_content(f"請分析美股 {code} 近期產業動態、華爾街機構看法，並給出波段進場建議，100字內。").text
+                            st.success(res)
+                        except Exception as e:
+                            st.error("API 額度限制中，請稍後再試。")
 
 # ====================
 # 戰區 3：10年核心資產
