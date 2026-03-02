@@ -34,7 +34,6 @@ def get_full_stock_db():
 
 @st.cache_data(ttl=60)
 def get_market_temp():
-    """🌡️ 大盤溫度計：抓取台股加權指數與美股那斯達克"""
     headers = {"User-Agent": "Mozilla/5.0"}
     indices = {'^TWII': '台股加權', '^IXIC': '那斯達克'}
     results = {}
@@ -53,7 +52,6 @@ def get_market_temp():
 
 @st.cache_data(ttl=900)
 def get_historical_features(code, is_us=False):
-    """支援台美股的歷史日K引擎"""
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suffix in suffixes:
@@ -70,7 +68,6 @@ def get_historical_features(code, is_us=False):
                 'Low': quote_1d['low'], 'Close': quote_1d['close'], 'Volume': quote_1d['volume']
             }, index=idx_1d).dropna()
             
-            # 計算 RSI 供長線參考
             delta = df_daily['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -106,6 +103,7 @@ def get_realtime_tick(code, suffix):
         }, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
+# 🚀 恢復：專屬極速報價引擎 (用於連動股)
 @st.cache_data(ttl=5)
 def get_quick_quote(code, is_us=False):
     stock_db = get_full_stock_db()
@@ -128,6 +126,7 @@ def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
     now = datetime.datetime.now(tw_tz)
+    is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     prompt = f"""
@@ -167,21 +166,18 @@ def get_correlated_stocks(code, name, is_us=False):
 # --- 3. 網頁介面 ---
 st.title("⚡ AI 跨海智能戰情室")
 
-# 狀態初始化
 if 'tw_stocks' not in st.session_state: st.session_state.tw_stocks = []
 if 'us_stocks' not in st.session_state: st.session_state.us_stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
-# 預設植入 10 年期 20 萬本金計畫的核心標的
 if 'core_assets' not in st.session_state: 
     st.session_state.core_assets = [
-        {"code": "0050", "is_us": False}, {"code": "009816", "is_us": False},
-        {"code": "QQQM", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
+        {"code": "0050", "is_us": False}, {"code": "00891", "is_us": False},
+        {"code": "QQQ", "is_us": True}, {"code": "VOO", "is_us": True}, {"code": "VT", "is_us": True}
     ]
 
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
 
-# 🌡️ 頂部大盤溫度計
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp:
@@ -202,7 +198,6 @@ with col_t3:
 
 st.divider()
 
-# --- 側邊欄控制 ---
 with st.sidebar:
     st.header("⚙️ 實戰監控設定")
     auto_refresh = st.checkbox("⚡ 開啟台股極速自動更新 (3秒)", value=False)
@@ -238,7 +233,6 @@ with st.sidebar:
         st.session_state.logs = [] 
         st.rerun()
 
-# --- AI 報告區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算跨國 TOP 5 精選清單...")
     with st.spinner('建立多空互斥防線，掃描全球資金動向...'):
@@ -269,7 +263,6 @@ elif getattr(st.session_state, 'ai_report', None):
             st.session_state.ai_report = None
             st.rerun()
 
-# 🚀 建立三大戰區 Tabs
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線 (20萬本金計畫)"])
 
 # ====================
@@ -304,11 +297,25 @@ with tab_tw:
             
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
+            # 🚀 恢復：台股連動股即時報價迴圈
             corr_codes = get_correlated_stocks(code, name, is_us=False)
-            corr_str = " ｜ ".join([f"🔗 {c}" for c in corr_codes]) if corr_codes else ""
+            corr_displays = []
+            for idx, c_code in enumerate(corr_codes):
+                c_curr, c_prev, c_name = get_quick_quote(c_code, is_us=False)
+                if c_curr is not None and c_prev is not None and c_prev > 0:
+                    pct = ((c_curr - c_prev) / c_prev) * 100
+                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
+                    sign = "+" if pct > 0 else ""
+                    prefix = "👑 " if idx == 0 else "🔗 "
+                    corr_displays.append(f"{prefix}{c_name}: :{color}[**{c_curr:.2f} ({sign}{pct:.2f}%)**]")
+                else:
+                    corr_displays.append(f"🔗 {c_code}: 載入中")
+            corr_str = " ｜ ".join(corr_displays) if corr_displays else ""
 
             with st.container(border=True):
                 st.markdown(f"#### {name}({code}) ✨ 型態: **{','.join(strategies) if strategies else '觀察中'}**")
+                
+                # 在介面上顯示帶有紅綠漲幅的連動股
                 if corr_str: st.markdown(f"**族群跟漲指標**：{corr_str}")
                 
                 c1, c2, c3 = st.columns(3)
@@ -335,11 +342,25 @@ with tab_us:
             ma10, ma20 = df_daily['Close'].tail(10).mean(), df_daily['Close'].tail(20).mean()
             rsi = df_daily['RSI'].iloc[-1]
             
+            # 🚀 恢復：美股連動股即時報價迴圈 (美股習慣是綠漲紅跌，但為了與台股介面統一防混淆，這裡同樣使用紅漲綠跌顯示)
             corr_codes = get_correlated_stocks(code, code, is_us=True)
-            corr_str = " ｜ ".join([f"🔗 {c}" for c in corr_codes]) if corr_codes else ""
+            corr_displays = []
+            for idx, c_code in enumerate(corr_codes):
+                c_curr, c_prev, c_name = get_quick_quote(c_code, is_us=True)
+                if c_curr is not None and c_prev is not None and c_prev > 0:
+                    pct = ((c_curr - c_prev) / c_prev) * 100
+                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
+                    sign = "+" if pct > 0 else ""
+                    prefix = "👑 " if idx == 0 else "🔗 "
+                    corr_displays.append(f"{prefix}{c_name}: :{color}[**${c_curr:.2f} ({sign}{pct:.2f}%)**]")
+                else:
+                    corr_displays.append(f"🔗 {c_code}: 載入中")
+            corr_str = " ｜ ".join(corr_displays) if corr_displays else ""
 
             with st.container(border=True):
                 st.markdown(f"#### 🦅 {code} (美股)")
+                
+                # 在介面上顯示帶有紅綠漲幅的美股連動股
                 if corr_str: st.markdown(f"**美股連動指標**：{corr_str}")
                 
                 c1, c2, c3 = st.columns(3)
@@ -371,7 +392,6 @@ with tab_core:
             ma200 = df_daily['Close'].tail(200).mean() if len(df_daily)>=200 else curr_p
             rsi = df_daily['RSI'].iloc[-1]
             
-            # 長線進場燈號判定
             signal = "⏳ 定期定額持倉"
             s_color = "gray"
             if curr_p < ma60 and rsi < 40:
@@ -393,4 +413,3 @@ with tab_core:
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
-
