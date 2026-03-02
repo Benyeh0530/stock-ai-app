@@ -8,6 +8,7 @@ import pytz
 import json
 import re
 import time
+import os
 import numpy as np
 
 # --- 基礎設定 ---
@@ -20,7 +21,6 @@ if API_KEY:
     genai.configure(api_key=API_KEY)
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
-# 📱 Telegram 推播設定 (請先在 st.secrets 中設定)
 TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
@@ -30,6 +30,32 @@ def send_telegram_alert(msg):
     try:
         requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
+
+# --- 💾 永久記憶資料庫系統 ---
+DATA_FILE = "watchlist_data.json"
+
+def load_watchlist():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except: pass
+    return {"tw": [], "us": []}
+
+def save_watchlist(tw, us):
+    try:
+        with open(DATA_FILE, "w", encoding='utf-8') as f:
+            json.dump({"tw": tw, "us": us}, f, ensure_ascii=False)
+    except: pass
+
+# 狀態初始化 (讀取永久記憶)
+if 'initialized' not in st.session_state:
+    data = load_watchlist()
+    st.session_state.tw_stocks = data.get("tw", [])
+    st.session_state.us_stocks = data.get("us", [])
+    st.session_state.logs = []
+    st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
+    st.session_state.initialized = True
 
 # --- 2. 核心數據引擎 ---
 @st.cache_data(ttl=86400)
@@ -111,24 +137,6 @@ def get_realtime_tick(code, suffix):
         }, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=5)
-def get_quick_quote(code, is_us=False):
-    stock_db = get_full_stock_db()
-    name = code if is_us else stock_db.get(code, code)
-    headers = {"User-Agent": "Mozilla/5.0"}
-    suffixes = [""] if is_us else [".TW", ".TWO"]
-    for suffix in suffixes:
-        try:
-            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d"
-            res = requests.get(url, headers=headers, timeout=2).json()
-            if not res.get('chart', {}).get('result'): continue
-            quotes = res['chart']['result'][0]['indicators']['quote'][0]['close']
-            closes = [c for c in quotes if c is not None]
-            if len(closes) < 2: continue
-            return closes[-1], closes[-2], name
-        except: continue
-    return None, None, name
-
 def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
@@ -156,29 +164,12 @@ def get_advanced_ai_report():
         if "429" in str(e): return {"error": "🚨 Google API 額度已滿，暫時切換純監控模式。"}
         return {"error": f"AI 產出錯誤: {e}"}
 
-@st.cache_data(ttl=86400)
-def get_correlated_stocks(code, name, is_us=False):
-    if not API_KEY: return []
-    market = "美股" if is_us else "台股"
-    prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。回傳純代碼逗號分隔。"
-    try:
-        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
-    except: return []
-
-# 🚀 輔助功能：自動從字串萃取價格
 def extract_price(price_str):
     match = re.search(r'\d+(\.\d+)?', str(price_str))
     return float(match.group()) if match else 0.0
 
 # --- 3. 網頁介面 ---
 st.title("⚡ AI 跨海智能戰情室")
-
-if 'tw_stocks' not in st.session_state: st.session_state.tw_stocks = []
-if 'us_stocks' not in st.session_state: st.session_state.us_stocks = []
-if 'logs' not in st.session_state: st.session_state.logs = []
-if 'core_assets' not in st.session_state: 
-    st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
 
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
@@ -205,7 +196,6 @@ with st.sidebar:
     auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
     st.divider()
     
-    # Telegram 狀態顯示
     if TG_BOT_TOKEN and TG_CHAT_ID:
         st.success("📱 Telegram 推播已啟用")
     else:
@@ -226,19 +216,20 @@ with st.sidebar:
             code = selected_tw.split(" ")[0]
             name = " ".join(selected_tw.split(" ")[1:])
             if code not in [s['code'] for s in st.session_state.tw_stocks]:
-                # 手動加入時目標價預設為 0
                 st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": 0.0, "alert_triggered": False})
+                save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                 st.rerun()
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if st.button("➕ 加入美股"):
         if us_code and us_code not in [s['code'] for s in st.session_state.us_stocks]:
             st.session_state.us_stocks.append({"code": us_code, "name": us_code, "target_price": 0.0, "alert_triggered": False})
+            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
             st.rerun()
             
-    if st.button("🗑️ 清空所有資料"):
+    if st.button("🗑️ 徹底清空所有資料"):
         st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.logs = []
-        st.session_state.pop('core_assets', None)
+        save_watchlist([], [])
         st.rerun()
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
@@ -262,9 +253,9 @@ elif getattr(st.session_state, 'ai_report', None):
                             if 'code' in stock and st.button(f"➕ 帶入價格並監控", key=f"add_{category}_{stock['code']}"):
                                 target_list = st.session_state.us_stocks if "美股" in category else st.session_state.tw_stocks
                                 if stock['code'] not in [s['code'] for s in target_list]:
-                                    # 🚀 自動萃取 AI 建議價格
                                     t_price = extract_price(stock.get('price', '0'))
                                     target_list.append({"code": stock['code'], "name": stock.get('name', stock['code']), "target_price": t_price, "alert_triggered": False})
+                                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
 
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
@@ -274,7 +265,7 @@ tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美
 # ====================
 with tab_tw:
     if not st.session_state.tw_stocks: st.info("請加入台股。")
-    for stock in st.session_state.tw_stocks:
+    for idx, stock in enumerate(st.session_state.tw_stocks):
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
         
@@ -286,7 +277,6 @@ with tab_tw:
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 價格監控引擎與 Telegram 推播
             is_alert = False
             if t_price > 0:
                 if curr_p >= t_price:
@@ -294,23 +284,47 @@ with tab_tw:
                     if not stock.get('alert_triggered', False):
                         msg = f"🚨 【台股到價通知】\n{name}({code}) 已達目標價！\n現價：{curr_p}\n警示價：{t_price}"
                         send_telegram_alert(msg)
-                        stock['alert_triggered'] = True # 避免重複瘋狂發送
-                elif curr_p < t_price * 0.99: # 跌回去一點才重置警報，防止在邊緣反覆橫跳
-                    stock['alert_triggered'] = False
+                        st.session_state.tw_stocks[idx]['alert_triggered'] = True
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                elif curr_p < t_price * 0.99: 
+                    st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
-            border_color = "red" if is_alert else "gray"
             with st.container(border=True):
+                # 📌 標題區與「單獨移除按鈕」
+                c_title, c_del = st.columns([5, 1])
+                with c_title: st.markdown(f"#### {name}({code})")
+                with c_del:
+                    if st.button("❌ 移除", key=f"del_tw_{code}"):
+                        st.session_state.tw_stocks.pop(idx)
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
+
                 if is_alert:
                     st.error(f"🚨 **到價警示！** {name} 已碰觸或越過目標價 {t_price}")
                 
-                # 允許手動調整監控價格
-                new_t_price = st.number_input(f"設定 {name} 目標警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
-                if new_t_price != t_price:
-                    stock['target_price'] = new_t_price
-                    stock['alert_triggered'] = False
-                    st.rerun()
+                # 📌 設定價格區與「手動一鍵算價」
+                c_inp, c_ai = st.columns([2, 1])
+                with c_inp:
+                    new_t_price = st.number_input(f"目標警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
+                    if new_t_price != t_price:
+                        st.session_state.tw_stocks[idx]['target_price'] = new_t_price
+                        st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
+                with c_ai:
+                    if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_{code}"):
+                        with st.spinner("算價中..."):
+                            try:
+                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給一個當沖停利目標價，只回傳數字。").text
+                                p_match = extract_price(res)
+                                if p_match > 0:
+                                    st.session_state.tw_stocks[idx]['target_price'] = p_match
+                                    st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                                    st.rerun()
+                            except: st.error("API繁忙")
 
-                st.markdown(f"#### {name}({code})")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日VWAP", f"{vwap:.2f}")
@@ -321,7 +335,7 @@ with tab_tw:
 # ====================
 with tab_us:
     if not st.session_state.us_stocks: st.info("請加入美股。")
-    for stock in st.session_state.us_stocks:
+    for idx, stock in enumerate(st.session_state.us_stocks):
         code = stock['code']
         t_price = stock.get('target_price', 0.0)
         df_daily, _, _ = get_historical_features(code, is_us=True)
@@ -330,7 +344,6 @@ with tab_us:
             curr_p = df_daily['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             
-            # 🚀 美股價格監控引擎
             is_alert = False
             if t_price > 0:
                 if curr_p >= t_price:
@@ -338,25 +351,51 @@ with tab_us:
                     if not stock.get('alert_triggered', False):
                         msg = f"🦅 【美股到價通知】\n{code} 已達目標價！\n現價：${curr_p}\n警示價：${t_price}"
                         send_telegram_alert(msg)
-                        stock['alert_triggered'] = True
+                        st.session_state.us_stocks[idx]['alert_triggered'] = True
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                 elif curr_p < t_price * 0.99:
-                    stock['alert_triggered'] = False
+                    st.session_state.us_stocks[idx]['alert_triggered'] = False
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
             with st.container(border=True):
+                # 📌 標題與刪除按鈕
+                c_title, c_del = st.columns([5, 1])
+                with c_title: st.markdown(f"#### 🦅 {code} (美股)")
+                with c_del:
+                    if st.button("❌ 移除", key=f"del_us_{code}"):
+                        st.session_state.us_stocks.pop(idx)
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
+
                 if is_alert:
                     st.error(f"🚨 **到價警示！** {code} 已碰觸或越過目標價 ${t_price}")
                 
-                new_t_price = st.number_input(f"設定 {code} 目標警示價", value=float(t_price), step=1.0, key=f"inp_us_{code}")
-                if new_t_price != t_price:
-                    stock['target_price'] = new_t_price
-                    stock['alert_triggered'] = False
-                    st.rerun()
+                # 📌 設定價格區與「手動一鍵算價」
+                c_inp, c_ai = st.columns([2, 1])
+                with c_inp:
+                    new_t_price = st.number_input(f"目標警示價", value=float(t_price), step=1.0, key=f"inp_us_{code}")
+                    if new_t_price != t_price:
+                        st.session_state.us_stocks[idx]['target_price'] = new_t_price
+                        st.session_state.us_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
+                with c_ai:
+                    if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
+                        with st.spinner("算價中..."):
+                            try:
+                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，請給一個波段停利目標價，只回傳數字。").text
+                                p_match = extract_price(res)
+                                if p_match > 0:
+                                    st.session_state.us_stocks[idx]['target_price'] = p_match
+                                    st.session_state.us_stocks[idx]['alert_triggered'] = False
+                                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                                    st.rerun()
+                            except: st.error("API繁忙")
 
-                st.markdown(f"#### 🦅 {code} (美股)")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
-                c3.metric("RSI (超買/超賣)", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
+                c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
 
 # ====================
 # 戰區 3：10年核心資產
@@ -374,7 +413,7 @@ with tab_core:
                 c2.metric("季線 (60MA)", f"{df_daily['Close'].tail(60).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}")
 
-# 引擎循環控制
+# 引擎循環控制 (只有網頁開著的時候才會執行倒數與重整)
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
