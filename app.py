@@ -65,7 +65,8 @@ def get_stock_data(code):
             last_day = df_1m_all.index[-1].date()
             df_1m_today = df_1m_all[df_1m_all.index.date == last_day]
 
-            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=1mo"
+            # 🚀 為了計算 K 線型態，將抓取範圍擴大為 3 個月，並抓取 O, H, L, C, V
+            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=3mo"
             res_1d = requests.get(url_1d, headers=headers, timeout=5)
             data_1d = res_1d.json()
             
@@ -74,7 +75,13 @@ def get_stock_data(code):
                 result_1d = data_1d['chart']['result'][0]
                 if 'timestamp' in result_1d:
                     quote_1d = result_1d['indicators']['quote'][0]
-                    df_daily = pd.DataFrame({'Close': quote_1d['close']}).dropna()
+                    df_daily = pd.DataFrame({
+                        'Open': quote_1d['open'],
+                        'High': quote_1d['high'],
+                        'Low': quote_1d['low'],
+                        'Close': quote_1d['close'],
+                        'Volume': quote_1d['volume']
+                    }).dropna()
 
             return df_1m_today, df_daily, ma20_15k
 
@@ -91,24 +98,21 @@ def get_advanced_ai_report():
 
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
-    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。不要包含任何 markdown 語法 (如 ```json) 或其他解釋文字，只能輸出純 JSON。
-    【限制條件】：所有推薦股票必須在 150 元（含）以下！
+    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。
+    
+    【絕對限制條件 - 違反將導致系統崩潰】：
+    1. 所有推薦股票目前股價必須在 150 元（含）以下！
+    2. 每一個類別（陣列），必須「嚴格且精準地提供剛好 5 檔」股票！
 
     JSON 格式如下：
     {{
-      "當沖作多": [
-        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "看多理由"}}
-      ],
-      "當沖作空": [
-        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "看空理由"}}
-      ],
-      "波段操作": [
-        {{"code": "代碼", "name": "名稱", "price": "進場區間", "reason": "法人動態與產業分析"}}
-      ],
-      "隔日沖": [
-        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "尾盤鎖碼分析"}}
-      ]
+      "當沖作多": [ 必須填入剛好 5 筆資料 ],
+      "當沖作空": [ 必須填入剛好 5 筆資料 ],
+      "波段操作": [ 必須填入剛好 5 筆資料 ],
+      "隔日沖": [ 必須填入剛好 5 筆資料 ]
     }}
+    
+    (陣列內的每一個物件格式必須為：{{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "詳細看多/看空/波段/鎖碼的理由。若為波段操作，請特別點出三大法人買賣超狀況與產業題材。"}})
     """
     if not is_after_1230:
         prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
@@ -122,7 +126,7 @@ def get_advanced_ai_report():
         return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
 # --- 3. 網頁介面 ---
-st.title("⚡ AI 智能監控戰情室")
+st.title("⚡ AI 智能監控戰情室 (含策略型態掃描)")
 
 if 'stocks' not in st.session_state: st.session_state.stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
@@ -163,7 +167,7 @@ with st.sidebar:
 # --- 報告載入區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算並建立選股資料庫 (約需 10~20 秒)...")
-    with st.spinner('過濾 150 元以下標的...'):
+    with st.spinner('確保各分類精準挑選 5 檔標的，並分析籌碼狀況...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
@@ -171,26 +175,21 @@ elif getattr(st.session_state, 'ai_report', None):
     
     with st.container(border=True):
         st.subheader("🤖 AI 精選清單 (點擊看詳細分析)")
-        
         if "error" in report_data:
             st.error(report_data["error"])
         else:
             tabs = st.tabs(list(report_data.keys()))
-            
             for i, (category, stocks) in enumerate(report_data.items()):
                 with tabs[i]:
-                    if not stocks:
-                        st.info("時間未達或目前無符合條件的標的。")
-                    
-                    for stock in stocks:
-                        with st.expander(f"🎯 {stock['name']} ({stock['code']}) | 參考價: {stock.get('price', '--')}"):
-                            st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
-                            
-                            if st.button(f"➕ 加入 {stock['name']} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
-                                if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
-                                    st.session_state.stocks.append({"code": stock['code'], "name": stock['name']})
-                                    st.rerun()
-                                    
+                    if not stocks: st.info("時間未達或目前無符合條件的標的。")
+                    else:
+                        for stock in stocks:
+                            with st.expander(f"🎯 {stock.get('name', '未知')} ({stock.get('code', '----')}) | 參考價: {stock.get('price', '--')}"):
+                                st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
+                                if 'code' in stock and st.button(f"➕ 加入 {stock.get('name', '該檔')} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
+                                    if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
+                                        st.session_state.stocks.append({"code": stock['code'], "name": stock.get('name', '')})
+                                        st.rerun()
         st.divider()
         if st.button("✖️ 關閉報告"):
             st.session_state.ai_report = None
@@ -219,12 +218,59 @@ else:
         
         df_1m, df_daily, ma20_15k = get_stock_data(code)
         
-        if df_1m is not None and not df_1m.empty and ma20_15k is not None:
+        if df_1m is not None and not df_1m.empty and ma20_15k is not None and not df_daily.empty:
             curr_p = df_1m['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             high_p = df_1m['High'].max()
             low_p = df_1m['Low'].min()
             
+            # --- 🚀 策略 K 線引擎：即時運算多空型態 ---
+            strategies = []
+            if len(df_daily) >= 20:
+                # 取得近期每日資料
+                c_today = curr_p
+                o_today = df_daily['Open'].iloc[-1]
+                h_today = df_daily['High'].iloc[-1]
+                l_today = df_daily['Low'].iloc[-1]
+                v_today = df_daily['Volume'].iloc[-1]
+                
+                c_yest = df_daily['Close'].iloc[-2]
+                o_yest = df_daily['Open'].iloc[-2]
+                h_yest = df_daily['High'].iloc[-2]
+                
+                c_prev = df_daily['Close'].iloc[-3]
+                o_prev = df_daily['Open'].iloc[-3]
+
+                # 計算日均線
+                ma5 = df_daily['Close'].tail(5).mean()
+                ma10 = df_daily['Close'].tail(10).mean()
+                ma20 = df_daily['Close'].tail(20).mean()
+                v_ma5 = df_daily['Volume'].tail(5).mean()
+
+                # 策略 1: 均線多頭排列
+                if c_today > ma5 > ma10 > ma20:
+                    strategies.append("🌈 多頭排列")
+                
+                # 策略 2: 量價齊揚 (今日量大於5日均量2倍，且收紅)
+                if v_today > v_ma5 * 2 and c_today > o_today:
+                    strategies.append("🔥 量價齊揚")
+
+                # 策略 3: 紅三兵 (連三紅，且收盤價創新高)
+                if (c_today > o_today) and (c_yest > o_yest) and (c_prev > o_prev):
+                    if c_today > c_yest > c_prev:
+                        strategies.append("📈 紅三兵")
+
+                # 策略 4: 下影線打底 (下影線長度 > 實體K線2倍)
+                body = abs(c_today - o_today)
+                lower_shadow = min(c_today, o_today) - l_today
+                if lower_shadow > body * 2 and body > 0:
+                    strategies.append("🔨 探底神針")
+                    
+                # 策略 5: 強勢跳空 (今日開盤直接越過昨日最高)
+                if o_today > h_yest:
+                    strategies.append("🚀 強勢跳空")
+
+            # 爆量紀錄
             vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
             
@@ -234,8 +280,7 @@ else:
                     if vol > avg_5m * 2.5 and vol > 100:
                         time_str = ts.strftime("%H:%M")
                         msg = f"[{time_str}] ⚡ {name}({code}) | 5分K爆量: {int(vol)}張"
-                        if msg not in [l['msg'] for l in st.session_state.logs]:
-                            st.session_state.logs.append({"time": time_str, "msg": msg})
+                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": time_str, "msg": msg})
 
             if len(vol_15m) > 0:
                 avg_15m = vol_15m.mean()
@@ -243,18 +288,20 @@ else:
                     if vol > avg_15m * 2.5 and vol > 200:
                         time_str = ts.strftime("%H:%M")
                         msg = f"[{time_str}] 🔥 {name}({code}) | 15分K爆量: {int(vol)}張"
-                        if msg not in [l['msg'] for l in st.session_state.logs]:
-                            st.session_state.logs.append({"time": time_str, "msg": msg})
+                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": time_str, "msg": msg})
             
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
             
             with st.container(border=True):
+                # 如果有觸發策略，在股票名稱旁邊顯示標籤
+                strat_tags = " | ".join(strategies) if strategies else "觀察中"
+                st.markdown(f"#### {name}({code}) ✨ 觸發型態: **{strat_tags}**")
+                
                 c1, c2, c3 = st.columns(3)
-                c1.metric(f"{name}({code})", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
+                c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日均價線", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
-                # --- 🚀 全新的深度策略分析區塊 (加入專屬 AI 按鈕) ---
                 with st.expander("🔍 深度策略分析", expanded=False):
                     d_col = "red" if curr_p > vwap else "green"
                     st.markdown(f"⚡ **當沖建議**: :{d_col}[{'多方強勢' if curr_p > vwap else '空方強勢'}] | 參考點位: {vwap:.2f}")
@@ -269,10 +316,9 @@ else:
                     
                     st.divider()
                     
-                    # 🤖 專屬 AI 波段分析召喚按鈕
-                    if st.button(f"🤖 呼叫 AI 分析波段進場價", key=f"ai_wave_{code}", use_container_width=True):
-                        with st.spinner(f'正在為您深度分析 {name} 的合理波段價位...'):
-                            prompt = f"我是台股操盤手。請針對 {name}({code})，目前即時股價為 {curr_p:.2f}。請拋棄死板的均線，用你對這檔股票產業與近期市場動態的了解，明確給我一個『建議的波段進場價位區間』與『看多或看空的理由』。字數請控制在100字以內，精準扼要。"
+                    if st.button(f"🤖 呼叫 AI 分析籌碼與波段進場價", key=f"ai_wave_{code}", use_container_width=True):
+                        with st.spinner(f'正在為您深度分析 {name} 的籌碼動態與合理波段...'):
+                            prompt = f"我是台股操盤手。請針對 {name}({code})，目前即時股價為 {curr_p:.2f}。請幫我分析近期『三大法人（外資/投信/自營商）可能的買賣超動態與籌碼集中度』，並綜合產業題材，給我一個『建議的波段進場價位區間』。字數請控制在100字以內，精準扼要。"
                             try:
                                 analysis = ai_model.generate_content(prompt).text
                                 st.success(analysis)
