@@ -34,26 +34,42 @@ def get_full_stock_db():
 def get_stock_data(code):
     try:
         suffix = ".TW" if len(code) == 4 else ".TWO"
+        # 偽裝成 Mac 筆電的正常瀏覽器連線
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
         
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        })
+        # --- 1. 直接爬取 Yahoo 底層 1K JSON 資料 ---
+        url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d"
+        res_1m = requests.get(url_1m, headers=headers, timeout=5).json()
         
-        ticker = yf.Ticker(f"{code}{suffix}", session=session)
+        df_1m = pd.DataFrame()
+        if res_1m.get('chart', {}).get('result'):
+            result = res_1m['chart']['result'][0]
+            if 'timestamp' in result:
+                # 自動校正為台灣時間
+                idx = pd.to_datetime(result['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
+                quote = result['indicators']['quote'][0]
+                df_1m = pd.DataFrame({
+                    'High': quote['high'], 
+                    'Low': quote['low'], 
+                    'Close': quote['close'], 
+                    'Volume': quote['volume']
+                }, index=idx).dropna()
+
+        # --- 2. 直接爬取 Yahoo 底層 日K JSON 資料 ---
+        url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d"
+        res_1d = requests.get(url_1d, headers=headers, timeout=5).json()
         
-        # 🚀 關鍵破解：將 1d 改為 5d，避開主機時區錯亂導致的空資料
-        df_1m = ticker.history(period="5d", interval="1m")
-        df_daily = ticker.history(period="1mo", interval="1d")
-        
-        # 確保有抓到資料後，手動只裁切出「最新那一天」的 1K 線
-        if df_1m is not None and not df_1m.empty:
-            last_day = df_1m.index[-1].date()
-            df_1m = df_1m[df_1m.index.date == last_day]
-            
+        df_daily = pd.DataFrame()
+        if res_1d.get('chart', {}).get('result'):
+            result = res_1d['chart']['result'][0]
+            if 'timestamp' in result:
+                quote = result['indicators']['quote'][0]
+                df_daily = pd.DataFrame({'Close': quote['close']}).dropna()
+
         return df_1m, df_daily
+        
     except Exception as e:
-        print(f"抓取失敗: {e}")
+        # 靜默處理錯誤，避免畫面崩潰
         return None, None
 
 # 🚀 全新強大的 AI 投顧選股引擎
@@ -199,6 +215,7 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
 
 
 
