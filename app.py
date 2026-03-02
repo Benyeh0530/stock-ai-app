@@ -31,7 +31,7 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🐘 引擎A：歷史重裝引擎 (快取 15 分鐘，負責算長天期均線與策略)
+# 🐘 引擎A：歷史重裝引擎 (快取 15 分鐘)
 @st.cache_data(ttl=900)
 def get_historical_features(code):
     headers = {
@@ -40,7 +40,6 @@ def get_historical_features(code):
     }
     for suffix in [".TW", ".TWO"]:
         try:
-            # 日K (3個月)
             url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=3mo"
             res_1d = requests.get(url_1d, headers=headers, timeout=5).json()
             if not res_1d.get('chart', {}).get('result'): continue 
@@ -53,7 +52,6 @@ def get_historical_features(code):
                 'Low': quote_1d['low'], 'Close': quote_1d['close'], 'Volume': quote_1d['volume']
             }, index=idx_1d).dropna()
 
-            # 直接抓 Yahoo 原生 15K (5天)，極大節省運算效能
             url_15m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=15m&range=5d"
             res_15m = requests.get(url_15m, headers=headers, timeout=5).json()
             res_15m_data = res_15m['chart']['result'][0]
@@ -63,18 +61,17 @@ def get_historical_features(code):
             
             ma20_15k = df_15m['Close'].tail(20).mean() if len(df_15m) >= 20 else df_15m['Close'].mean()
 
-            return df_daily, ma20_15k, suffix # 傳出正確的後綴，讓極速引擎不用瞎猜
+            return df_daily, ma20_15k, suffix
         except:
             continue
     return pd.DataFrame(), None, ""
 
-# ⚡ 引擎B：極速秒級引擎 (🔥 徹底拔除快取，負責即時跳動🔥)
+# ⚡ 引擎B：極速秒級引擎 (無快取)
 def get_realtime_tick(code, suffix):
     if not suffix: return pd.DataFrame()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
-    # 這裡只抓「今天 1 天」的 1 分鐘資料，資料量極小，不怕被封鎖
     url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d"
     try:
         res_1m = requests.get(url_1m, headers=headers, timeout=3).json()
@@ -88,6 +85,30 @@ def get_realtime_tick(code, suffix):
         return df_1m
     except:
         return pd.DataFrame()
+
+# 🚀 引擎C：連動股專屬極速報價 (快取5秒，兼顧即時與防封鎖)
+@st.cache_data(ttl=5)
+def get_quick_quote(code):
+    stock_db = get_full_stock_db()
+    name = stock_db.get(code, code)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    for suffix in [".TW", ".TWO"]:
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            if not res.get('chart', {}).get('result'): continue
+            
+            result = res['chart']['result'][0]
+            quotes = result['indicators']['quote'][0]
+            closes = [c for c in quotes['close'] if c is not None]
+            if len(closes) < 2: continue
+            
+            curr_p = closes[-1]
+            prev_close = closes[-2]
+            return curr_p, prev_close, name
+        except:
+            continue
+    return None, None, name
 
 def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
@@ -103,7 +124,7 @@ def get_advanced_ai_report():
     【絕對限制條件】：
     1. 所有推薦股票目前股價必須在 150 元（含）以下！
     2. 每一個類別，必須精準提供剛好 5 檔股票！
-    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱」。
+    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。
 
     JSON 格式如下：
     {{
@@ -116,8 +137,7 @@ def get_advanced_ai_report():
     
     (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準或所屬熱門產業", "reason": "詳細理由分析"}})
     """
-    if not is_after_1230:
-        prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
+    if not is_after_1230: prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
 
     try:
         generation_config = genai.types.GenerationConfig(temperature=0.0)
@@ -128,16 +148,18 @@ def get_advanced_ai_report():
     except Exception as e: 
         return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
+# 🚀 升級 AI 記憶引擎：強制第一檔為龍頭股，且只輸出代碼
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name):
-    if not API_KEY: return "需設定 API Key"
-    prompt = f"我是台股操盤手。請針對 {name}({code})，列出台股中與它『最具高度連動性、同產業或上下游、經常會跟漲跟跌』的 3 檔股票。請直接回傳「代碼+名稱」，用逗號分隔。不要加任何其他廢話或符號。"
+    if not API_KEY: return []
+    prompt = f"我是台股當沖客。請針對 {name}({code})，找出 3 檔台股中『同產業、最具高度連動性』的股票。要求：1. 必須剛好 3 檔。2. 第一檔必須是該族群的『絕對龍頭股』或『權值最高、最具指標性』的股票。3. 只能回傳純數字代碼，用半形逗號分隔，例如：2330,2454,2303。不要有任何其他文字。"
     try:
-        generation_config = genai.types.GenerationConfig(temperature=0.1)
+        generation_config = genai.types.GenerationConfig(temperature=0.0)
         res = ai_model.generate_content(prompt, generation_config=generation_config).text
-        return res.strip()
+        codes = [c.strip() for c in res.split(',') if c.strip().isdigit()]
+        return codes[:3]
     except:
-        return "連動分析載入中..."
+        return []
 
 # --- 3. 網頁介面 ---
 st.title("⚡ AI 智能監控戰情室 (極速當沖版)")
@@ -149,7 +171,6 @@ all_stocks = get_full_stock_db()
 
 with st.sidebar:
     st.header("⚙️ 當沖實戰設定")
-    # 🚀 全新！極速自動更新開關
     auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (每 3 秒)", value=False)
     
     st.divider()
@@ -217,7 +238,7 @@ st.divider()
 t_col1, t_col2 = st.columns([1, 1])
 with t_col1:
     if st.button("🔄 手動刷新即時股價"):
-        st.cache_data.clear() # 清除歷史快取
+        st.cache_data.clear() 
         st.rerun()
 with t_col2:
     tw_tz = pytz.timezone('Asia/Taipei')
@@ -231,7 +252,6 @@ else:
         code = stock['code']
         name = stock['name']
         
-        # 🚀 雙引擎分離執行
         df_daily, ma20_15k, suffix = get_historical_features(code)
         df_1m = get_realtime_tick(code, suffix)
         
@@ -297,12 +317,31 @@ else:
                         if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": time_str, "msg": msg})
             
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
-            correlated_stocks = get_correlated_stocks(code, name)
+            
+            # --- 🚀 取得連動股清單，並即時抓取報價與漲跌幅 ---
+            correlated_codes = get_correlated_stocks(code, name)
+            corr_displays = []
+            
+            for idx, c_code in enumerate(correlated_codes):
+                c_curr, c_prev, c_name = get_quick_quote(c_code)
+                if c_curr is not None and c_prev is not None and c_prev > 0:
+                    pct = ((c_curr - c_prev) / c_prev) * 100
+                    # 台股紅漲綠跌邏輯
+                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
+                    sign = "+" if pct > 0 else ""
+                    # 第一檔強制標示為👑龍頭
+                    prefix = "👑 " if idx == 0 else "🔗 "
+                    corr_displays.append(f"{prefix}{c_name}: :{color}[**{c_curr:.2f} ({sign}{pct:.2f}%)**]")
+                else:
+                    corr_displays.append(f"{c_code}: 暫無數據")
 
             with st.container(border=True):
                 strat_tags = " | ".join(strategies) if strategies else "觀察中"
                 st.markdown(f"#### {name}({code}) ✨ 觸發型態: **{strat_tags}**")
-                st.markdown(f"🔗 **跟漲連動族群**：`{correlated_stocks}`")
+                
+                # 🚀 將紅綠分明的即時連動報價顯示在最顯眼處
+                if corr_displays:
+                    st.markdown(f"**族群跟漲指標**：{' ｜ '.join(corr_displays)}")
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
@@ -343,7 +382,7 @@ if st.session_state.logs:
 else:
     st.info("目前無異常爆量訊號。系統持續監控中...")
 
-# --- 🚀 當沖殺器：底層循環自動更新系統 ---
+# --- 當沖殺器：底層循環自動更新系統 ---
 if auto_refresh:
-    time.sleep(3) # 停頓 3 秒後自動重新載入網頁
+    time.sleep(3) 
     st.rerun()
