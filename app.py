@@ -86,7 +86,7 @@ def get_realtime_tick(code, suffix):
     except:
         return pd.DataFrame()
 
-# 🚀 引擎C：連動股專屬極速報價 (快取5秒，兼顧即時與防封鎖)
+# 🚀 引擎C：連動股專屬極速報價 (快取5秒)
 @st.cache_data(ttl=5)
 def get_quick_quote(code):
     stock_db = get_full_stock_db()
@@ -117,6 +117,7 @@ def get_advanced_ai_report():
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    # 🚀 關鍵升級：強硬規定當沖標的必須具備高震幅
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
     請給出你認為勝率最高的「絕對 TOP 5」精選名單。請嚴格依照以下 JSON 格式回傳，不可有其他多餘文字。
@@ -124,7 +125,8 @@ def get_advanced_ai_report():
     【絕對限制條件】：
     1. 所有推薦股票目前股價必須在 150 元（含）以下！
     2. 每一個類別，必須精準提供剛好 5 檔股票！
-    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。
+    3. 必須在 "strategy" 欄位填寫簡短的判斷基準。特別是在「資金熱點TOP5」，請在 strategy 填寫「具體的熱門產業名稱」。
+    4. 【當沖震幅鐵令】：在「當沖作多」與「當沖作空」的選股中，必須挑選近期具備高周轉率，且「日震幅通常大於 5%」的熱門活躍股，絕對排除走勢溫吞的牛皮股！
 
     JSON 格式如下：
     {{
@@ -135,7 +137,7 @@ def get_advanced_ai_report():
       "隔日沖": [ 5筆資料 ]
     }}
     
-    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準或所屬熱門產業", "reason": "詳細理由分析"}})
+    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "詳細理由分析"}})
     """
     if not is_after_1230: prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
 
@@ -148,11 +150,10 @@ def get_advanced_ai_report():
     except Exception as e: 
         return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
-# 🚀 升級 AI 記憶引擎：強制第一檔為龍頭股，且只輸出代碼
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name):
     if not API_KEY: return []
-    prompt = f"我是台股當沖客。請針對 {name}({code})，找出 3 檔台股中『同產業、最具高度連動性』的股票。要求：1. 必須剛好 3 檔。2. 第一檔必須是該族群的『絕對龍頭股』或『權值最高、最具指標性』的股票。3. 只能回傳純數字代碼，用半形逗號分隔，例如：2330,2454,2303。不要有任何其他文字。"
+    prompt = f"我是台股當沖客。請針對 {name}({code})，找出 3 檔台股中『同產業、最具高度連動性』的股票。要求：1. 必須剛好 3 檔。2. 第一檔必須是該族群的『絕對龍頭股』。3. 只能回傳純數字代碼，用半形逗號分隔。不要有任何其他文字。"
     try:
         generation_config = genai.types.GenerationConfig(temperature=0.0)
         res = ai_model.generate_content(prompt, generation_config=generation_config).text
@@ -202,7 +203,7 @@ with st.sidebar:
 
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算 TOP 5 精選清單 (約需 10~20 秒)...")
-    with st.spinner('掃描近期熱門產業與資金動向，篩選最優質個股...'):
+    with st.spinner('過濾低波動牛皮股，鎖定高震幅當沖標的...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
@@ -318,7 +319,6 @@ else:
             
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
             
-            # --- 🚀 取得連動股清單，並即時抓取報價與漲跌幅 ---
             correlated_codes = get_correlated_stocks(code, name)
             corr_displays = []
             
@@ -326,10 +326,8 @@ else:
                 c_curr, c_prev, c_name = get_quick_quote(c_code)
                 if c_curr is not None and c_prev is not None and c_prev > 0:
                     pct = ((c_curr - c_prev) / c_prev) * 100
-                    # 台股紅漲綠跌邏輯
                     color = "red" if pct > 0 else "green" if pct < 0 else "gray"
                     sign = "+" if pct > 0 else ""
-                    # 第一檔強制標示為👑龍頭
                     prefix = "👑 " if idx == 0 else "🔗 "
                     corr_displays.append(f"{prefix}{c_name}: :{color}[**{c_curr:.2f} ({sign}{pct:.2f}%)**]")
                 else:
@@ -339,7 +337,6 @@ else:
                 strat_tags = " | ".join(strategies) if strategies else "觀察中"
                 st.markdown(f"#### {name}({code}) ✨ 觸發型態: **{strat_tags}**")
                 
-                # 🚀 將紅綠分明的即時連動報價顯示在最顯眼處
                 if corr_displays:
                     st.markdown(f"**族群跟漲指標**：{' ｜ '.join(corr_displays)}")
                 
@@ -382,7 +379,6 @@ if st.session_state.logs:
 else:
     st.info("目前無異常爆量訊號。系統持續監控中...")
 
-# --- 當沖殺器：底層循環自動更新系統 ---
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
