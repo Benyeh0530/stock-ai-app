@@ -14,14 +14,25 @@ import numpy as np
 st.set_page_config(page_title="AI 智能監控戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 1. AI 引擎設定 ---
+# --- 1. 引擎設定 (AI 與 Telegram) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if API_KEY:
     genai.configure(api_key=API_KEY)
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
+# 📱 Telegram 推播設定 (請先在 st.secrets 中設定)
+TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+
+def send_telegram_alert(msg):
+    if not TG_BOT_TOKEN or not TG_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
+    except: pass
+
 # --- 2. 核心數據引擎 ---
-@st.cache_data(ttl=86400) # 靜態清單：快取 1 天
+@st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
     try:
@@ -32,7 +43,7 @@ def get_full_stock_db():
     except: pass
     return db
 
-@st.cache_data(ttl=60) # 大盤溫度計：快取 1 分鐘即可
+@st.cache_data(ttl=60)
 def get_market_temp():
     headers = {"User-Agent": "Mozilla/5.0"}
     indices = {'^TWII': '台股加權', '^IXIC': '那斯達克'}
@@ -44,13 +55,11 @@ def get_market_temp():
             quotes = res['chart']['result'][0]['indicators']['quote'][0]['close']
             closes = [c for c in quotes if c is not None]
             if len(closes) >= 2:
-                curr, prev = closes[-1], closes[-2]
-                pct = ((curr - prev) / prev) * 100
-                results[name] = (curr, pct)
+                results[name] = (closes[-1], ((closes[-1] - closes[-2]) / closes[-2]) * 100)
         except: pass
     return results
 
-@st.cache_data(ttl=900) # 波段/長線歷史日K：快取 15 分鐘
+@st.cache_data(ttl=900)
 def get_historical_features(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
@@ -84,11 +93,9 @@ def get_historical_features(code, is_us=False):
                 ma20_15k = df_15m['Close'].tail(20).mean() if len(df_15m) >= 20 else df_15m['Close'].mean()
 
             return df_daily, ma20_15k, suffix
-        except:
-            continue
+        except: continue
     return pd.DataFrame(), None, ""
 
-# ⚡ 當沖生命線 1：極速秒級引擎 (🔥 無快取，每次強制抓取最新 1 分 K)
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -104,8 +111,7 @@ def get_realtime_tick(code, suffix):
         }, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# ⚡ 當沖生命線 2：連動股專屬極速報價 (快取3秒，配合自動更新頻率，確保即時跳動)
-@st.cache_data(ttl=3) 
+@st.cache_data(ttl=5)
 def get_quick_quote(code, is_us=False):
     stock_db = get_full_stock_db()
     name = code if is_us else stock_db.get(code, code)
@@ -123,7 +129,6 @@ def get_quick_quote(code, is_us=False):
         except: continue
     return None, None, name
 
-# --- 🚀 優雅降級：AI 選股報告防當機 ---
 def get_advanced_ai_report():
     if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
@@ -132,35 +137,39 @@ def get_advanced_ai_report():
 
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖跨國操盤手。
-    請嚴格依照 JSON 格式回傳實戰選股報告。台股限150元以下。各類別精準提供5檔且絕不重複。
-    JSON 格式如下：
+    請嚴格依照 JSON 格式回傳實戰選股報告。
+    【要求】：1. 台股150元以下。2. 各類別精準5檔且不重複。3. 價格請務必給出具體數字(例如 142.5)。
+    JSON:
     {{
-      "美股短波分析": [ 5筆資料 (美股代碼) ],
+      "美股短波分析": [ 5筆資料 ],
       "資金熱點TOP5": [ 5筆台股資料 ],
-      "台股當沖作多": [ 5筆台股資料 (需高震幅) ],
-      "台股當沖作空": [ 5筆台股資料 (需高震幅) ]
+      "台股當沖作多": [ 5筆台股資料 (高震幅) ],
+      "台股當沖作空": [ 5筆台股資料 (高震幅) ]
     }}
-    (物件格式：{{"code": "代碼", "name": "名稱", "price": "建議價位", "strategy": "判斷基準", "reason": "理由"}})
+    (格式：{{"code": "代碼", "name": "名稱", "price": "數字建議價位", "strategy": "判斷基準", "reason": "理由"}})
     """
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
         return json.loads(match.group(0) if match else response)
     except Exception as e:
-        if "429" in str(e):
-            return {"error": "🚨 Google API 免費額度已達上限。請稍後再試，或暫時專注於下方即時當沖看板（不受影響）。"}
+        if "429" in str(e): return {"error": "🚨 Google API 額度已滿，暫時切換純監控模式。"}
         return {"error": f"AI 產出錯誤: {e}"}
 
-# 🚀 AI 連動名單生成 (持久化快取：找代碼只要找一次就好，節省額度)
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
-    prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。只回傳純代碼，用逗號分隔。"
+    prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。回傳純代碼逗號分隔。"
     try:
         res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
     except: return []
+
+# 🚀 輔助功能：自動從字串萃取價格
+def extract_price(price_str):
+    match = re.search(r'\d+(\.\d+)?', str(price_str))
+    return float(match.group()) if match else 0.0
 
 # --- 3. 網頁介面 ---
 st.title("⚡ AI 跨海智能戰情室")
@@ -169,11 +178,7 @@ if 'tw_stocks' not in st.session_state: st.session_state.tw_stocks = []
 if 'us_stocks' not in st.session_state: st.session_state.us_stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'core_assets' not in st.session_state: 
-    st.session_state.core_assets = [
-        {"code": "0050", "is_us": False}, 
-        {"code": "009816", "is_us": False},
-        {"code": "QQQM", "is_us": True}
-    ]
+    st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
 
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
@@ -189,16 +194,23 @@ with col_t2:
         st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{val:.2f}", f"{pct:.2f}%", delta_color="normal" if pct > 0 else "inverse")
 with col_t3:
     tw_pct = market_temp.get('台股加權', (0,0))[1]
-    if tw_pct < -1.5: st.error("🚨 警告：今日大盤重挫，當沖請縮小部位！")
+    if tw_pct < -1.5: st.error("🚨 大盤重挫，當沖嚴控風險！")
     elif tw_pct > 1.0: st.success("🔥 大盤順風：多方動能強勁。")
-    else: st.info("⚖️ 大盤震盪：請密切關注族群輪動。")
+    else: st.info("⚖️ 大盤震盪：關注族群輪動。")
 
 st.divider()
 
 with st.sidebar:
     st.header("⚙️ 實戰監控設定")
-    auto_refresh = st.checkbox("⚡ 開啟台股極速自動更新 (3秒)", value=False)
+    auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
+    st.divider()
     
+    # Telegram 狀態顯示
+    if TG_BOT_TOKEN and TG_CHAT_ID:
+        st.success("📱 Telegram 推播已啟用")
+    else:
+        st.warning("📱 尚未設定 Telegram (設定 st.secrets 即可啟用)")
+
     st.divider()
     st.header("🤖 AI 獨家選股報告")
     if st.button("🚀 立即生成全盤選股報告", use_container_width=True, type="primary"):
@@ -206,28 +218,26 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    st.header("🎯 台股當沖監控加入")
+    st.header("🎯 自訂監控加入")
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
     if st.button("➕ 加入台股"):
-        if selected_tw and selected_tw != "請點此搜尋...":
+        if selected_tw != "請點此搜尋...":
             code = selected_tw.split(" ")[0]
             name = " ".join(selected_tw.split(" ")[1:])
             if code not in [s['code'] for s in st.session_state.tw_stocks]:
-                st.session_state.tw_stocks.append({"code": code, "name": name})
+                # 手動加入時目標價預設為 0
+                st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": 0.0, "alert_triggered": False})
                 st.rerun()
 
-    st.header("🦅 美股波段監控加入")
-    us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA, TSLA)").strip().upper()
+    us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if st.button("➕ 加入美股"):
         if us_code and us_code not in [s['code'] for s in st.session_state.us_stocks]:
-            st.session_state.us_stocks.append({"code": us_code, "name": us_code})
+            st.session_state.us_stocks.append({"code": us_code, "name": us_code, "target_price": 0.0, "alert_triggered": False})
             st.rerun()
             
-    if st.button("🗑️ 清空所有自選與日誌"):
-        st.session_state.tw_stocks = []
-        st.session_state.us_stocks = []
-        st.session_state.logs = [] 
+    if st.button("🗑️ 清空所有資料"):
+        st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.logs = []
         st.session_state.pop('core_assets', None)
         st.rerun()
 
@@ -239,195 +249,130 @@ if getattr(st.session_state, 'ai_report', None) == "loading":
 elif getattr(st.session_state, 'ai_report', None):
     report_data = st.session_state.ai_report
     with st.container(border=True):
-        st.subheader("🤖 AI 跨海精選清單 (點擊看詳細分析)")
+        st.subheader("🤖 AI 跨海精選清單")
         if "error" in report_data: st.error(report_data["error"])
         else:
             tabs = st.tabs(list(report_data.keys()))
             for i, (category, stocks) in enumerate(report_data.items()):
                 with tabs[i]:
-                    if not stocks: st.info("無符合條件標的。")
-                    else:
-                        for stock in stocks:
-                            display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '')}"
-                            with st.expander(display_title):
-                                st.write(f"**詳細分析**：\n{stock.get('reason', '')}")
-                                is_us_cat = "美股" in category
-                                if 'code' in stock and st.button(f"➕ 加入看板", key=f"add_{category}_{stock['code']}"):
-                                    target_list = st.session_state.us_stocks if is_us_cat else st.session_state.tw_stocks
-                                    if stock['code'] not in [s['code'] for s in target_list]:
-                                        target_list.append({"code": stock['code'], "name": stock.get('name', stock['code'])})
-                                        st.rerun()
-        if st.button("✖️ 關閉報告"):
-            st.session_state.ai_report = None
-            st.rerun()
+                    for stock in stocks:
+                        display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 參考價：{stock.get('price', '--')} | {stock.get('strategy', '')}"
+                        with st.expander(display_title):
+                            st.write(f"**詳細分析**：\n{stock.get('reason', '')}")
+                            if 'code' in stock and st.button(f"➕ 帶入價格並監控", key=f"add_{category}_{stock['code']}"):
+                                target_list = st.session_state.us_stocks if "美股" in category else st.session_state.tw_stocks
+                                if stock['code'] not in [s['code'] for s in target_list]:
+                                    # 🚀 自動萃取 AI 建議價格
+                                    t_price = extract_price(stock.get('price', '0'))
+                                    target_list.append({"code": stock['code'], "name": stock.get('name', stock['code']), "target_price": t_price, "alert_triggered": False})
+                                    st.rerun()
 
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
 
 # ====================
-# 戰區 1：台股極速當沖 (完全恢復即時 UI 介面)
+# 戰區 1：台股極速當沖
 # ====================
 with tab_tw:
-    if not st.session_state.tw_stocks: st.info("請於左側加入台股。")
+    if not st.session_state.tw_stocks: st.info("請加入台股。")
     for stock in st.session_state.tw_stocks:
         code, name = stock['code'], stock['name']
+        t_price = stock.get('target_price', 0.0)
+        
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
         if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
             curr_p = df_1m['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
-            high_p, low_p = df_1m['High'].max(), df_1m['Low'].min()
-            total_vol_today = df_1m['Volume'].sum()
-            
-            strategies = []
-            if len(df_daily) >= 20:
-                c_today, o_today, h_today = curr_p, df_daily['Open'].iloc[-1], df_daily['High'].iloc[-1]
-                c_yest, h_yest = df_daily['Close'].iloc[-2], df_daily['High'].iloc[-2]
-                ma5, ma20 = df_daily['Close'].tail(5).mean(), df_daily['Close'].tail(20).mean()
-                if c_today > ma5 > ma20: strategies.append("🌈 多頭排列")
-                if o_today > h_yest: strategies.append("🚀 強勢跳空")
-
-            if len(df_1m) > 30 and total_vol_today > 0:
-                tail_vol = df_1m['Volume'].tail(30).sum()
-                pos_percent = (curr_p - low_p) / (high_p - low_p + 0.0001)
-                if (tail_vol / total_vol_today) > 0.20 and pos_percent > 0.85:
-                    strategies.append("🚨 疑似隔日沖進場 (尾盤爆量)")
-
-            vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
-            if len(vol_15m) > 0:
-                for ts, vol in vol_15m.items():
-                    if vol > vol_15m.mean() * 2.5 and vol > 200:
-                        msg = f"[{ts.strftime('%H:%M')}] 🔥 {name}({code}) | 15K爆量: {int(vol)}張"
-                        if msg not in [l['msg'] for l in st.session_state.logs]: st.session_state.logs.append({"time": ts.strftime('%H:%M'), "msg": msg})
-            
-            # 🔥 極速即時 VWAP 運算
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🔥 極速連動股報價跳動 (3秒快取)
-            corr_codes = get_correlated_stocks(code, name, is_us=False)
-            corr_displays = []
-            for idx, c_code in enumerate(corr_codes):
-                c_curr, c_prev, c_name = get_quick_quote(c_code, is_us=False)
-                if c_curr is not None and c_prev is not None and c_prev > 0:
-                    pct = ((c_curr - c_prev) / c_prev) * 100
-                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
-                    sign = "+" if pct > 0 else ""
-                    prefix = "👑 " if idx == 0 else "🔗 "
-                    corr_displays.append(f"{prefix}{c_name}: :{color}[**{c_curr:.2f} ({sign}{pct:.2f}%)**]")
-                else:
-                    corr_displays.append(f"🔗 {c_code}: 載入中")
-            corr_str = " ｜ ".join(corr_displays) if corr_displays else ""
+            # 🚀 價格監控引擎與 Telegram 推播
+            is_alert = False
+            if t_price > 0:
+                if curr_p >= t_price:
+                    is_alert = True
+                    if not stock.get('alert_triggered', False):
+                        msg = f"🚨 【台股到價通知】\n{name}({code}) 已達目標價！\n現價：{curr_p}\n警示價：{t_price}"
+                        send_telegram_alert(msg)
+                        stock['alert_triggered'] = True # 避免重複瘋狂發送
+                elif curr_p < t_price * 0.99: # 跌回去一點才重置警報，防止在邊緣反覆橫跳
+                    stock['alert_triggered'] = False
 
-            # --- 完整 UI 卡片渲染 ---
+            border_color = "red" if is_alert else "gray"
             with st.container(border=True):
-                strat_tags = " | ".join(strategies) if strategies else "觀察中"
-                st.markdown(f"#### {name}({code}) ✨ 型態: **{strat_tags}**")
+                if is_alert:
+                    st.error(f"🚨 **到價警示！** {name} 已碰觸或越過目標價 {t_price}")
                 
-                if corr_str: st.markdown(f"**族群跟漲指標**：{corr_str}")
-                
+                # 允許手動調整監控價格
+                new_t_price = st.number_input(f"設定 {name} 目標警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
+                if new_t_price != t_price:
+                    stock['target_price'] = new_t_price
+                    stock['alert_triggered'] = False
+                    st.rerun()
+
+                st.markdown(f"#### {name}({code})")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
-                
-                with st.expander("🔍 當沖深度策略分析", expanded=False):
-                    d_col = "red" if curr_p > vwap else "green"
-                    st.markdown(f"⚡ **當沖建議**: :{d_col}[{'多方強勢' if curr_p > vwap else '空方強勢'}] | 參考點位: {vwap:.2f}")
-                    
-                    ma5_daily = df_daily['Close'].tail(5).mean() if len(df_daily) >= 5 else curr_p
-                    ma10_daily = df_daily['Close'].tail(10).mean() if len(df_daily) >= 10 else curr_p
-                    st.markdown(f"🌊 **波段技術支撐**: 5日線 ({ma5_daily:.2f}) / 10日線 ({ma10_daily:.2f})")
-
-                    pos = (curr_p - low_p) / (high_p - low_p + 0.001)
-                    n_msg = "📈 尾盤鎖碼 (隔日沖機率高)" if pos > 0.85 else "📉 尾盤殺低" if pos < 0.15 else "⏳ 區間震盪"
-                    st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
-
-    if st.session_state.logs:
-        st.subheader("🔔 台股帶量異常歷史紀錄")
-        st.text_area("今日爆量軌跡", value="\n\n".join([l['msg'] for l in sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)]), height=150)
 
 # ====================
-# 戰區 2：美股波段戰情 (完整恢復)
+# 戰區 2：美股波段戰情
 # ====================
 with tab_us:
-    if not st.session_state.us_stocks: st.info("請於左側加入美股 (波段監控看重日K與均線，無須秒級跳動)。")
+    if not st.session_state.us_stocks: st.info("請加入美股。")
     for stock in st.session_state.us_stocks:
         code = stock['code']
+        t_price = stock.get('target_price', 0.0)
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
         if not df_daily.empty:
             curr_p = df_daily['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
-            ma10, ma20 = df_daily['Close'].tail(10).mean(), df_daily['Close'].tail(20).mean()
-            rsi = df_daily['RSI'].iloc[-1]
             
-            corr_codes = get_correlated_stocks(code, code, is_us=True)
-            corr_displays = []
-            for idx, c_code in enumerate(corr_codes):
-                c_curr, c_prev, c_name = get_quick_quote(c_code, is_us=True)
-                if c_curr is not None and c_prev is not None and c_prev > 0:
-                    pct = ((c_curr - c_prev) / c_prev) * 100
-                    color = "red" if pct > 0 else "green" if pct < 0 else "gray"
-                    sign = "+" if pct > 0 else ""
-                    prefix = "👑 " if idx == 0 else "🔗 "
-                    corr_displays.append(f"{prefix}{c_name}: :{color}[**${c_curr:.2f} ({sign}{pct:.2f}%)**]")
-                else:
-                    corr_displays.append(f"🔗 {c_code}: 載入中")
-            corr_str = " ｜ ".join(corr_displays) if corr_displays else ""
+            # 🚀 美股價格監控引擎
+            is_alert = False
+            if t_price > 0:
+                if curr_p >= t_price:
+                    is_alert = True
+                    if not stock.get('alert_triggered', False):
+                        msg = f"🦅 【美股到價通知】\n{code} 已達目標價！\n現價：${curr_p}\n警示價：${t_price}"
+                        send_telegram_alert(msg)
+                        stock['alert_triggered'] = True
+                elif curr_p < t_price * 0.99:
+                    stock['alert_triggered'] = False
 
             with st.container(border=True):
+                if is_alert:
+                    st.error(f"🚨 **到價警示！** {code} 已碰觸或越過目標價 ${t_price}")
+                
+                new_t_price = st.number_input(f"設定 {code} 目標警示價", value=float(t_price), step=1.0, key=f"inp_us_{code}")
+                if new_t_price != t_price:
+                    stock['target_price'] = new_t_price
+                    stock['alert_triggered'] = False
+                    st.rerun()
+
                 st.markdown(f"#### 🦅 {code} (美股)")
-                
-                if corr_str: st.markdown(f"**美股連動指標**：{corr_str}")
-                
                 c1, c2, c3 = st.columns(3)
                 c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
-                c2.metric("波段月線 (20MA)", f"${ma20:.2f}")
-                
-                rsi_col = "red" if rsi > 70 else "green" if rsi < 30 else "normal"
-                c3.metric("RSI (超買/超賣)", f"{rsi:.1f}", delta_color="off")
-                
-                if st.button(f"🤖 呼叫 AI 分析 {code} 華爾街動向", key=f"us_ai_{code}"):
-                    with st.spinner("調閱華爾街法人報告..."):
-                        try:
-                            res = ai_model.generate_content(f"請分析美股 {code} 近期產業動態、華爾街機構看法，並給出波段進場建議，100字內。").text
-                            st.success(res)
-                        except Exception as e:
-                            st.error("API 額度限制中，請稍後再試。")
+                c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
+                c3.metric("RSI (超買/超賣)", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
 
 # ====================
 # 戰區 3：10年核心資產
 # ====================
 with tab_core:
-    st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫 (10年以上視野)")
-    st.info("💡 長線投資心法：不看 1 分 K，不理會短線震盪。只要價格低於 60MA (季線) 或 RSI 進入超賣區 (<40)，就是啟動 20 萬本金分批佈局的甜甜價。")
-    
+    st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫")
     for asset in st.session_state.core_assets:
         code, is_us = asset['code'], asset['is_us']
         df_daily, _, _ = get_historical_features(code, is_us=is_us)
-        
         if not df_daily.empty:
             curr_p = df_daily['Close'].iloc[-1]
-            ma60 = df_daily['Close'].tail(60).mean() if len(df_daily)>=60 else curr_p
-            ma200 = df_daily['Close'].tail(200).mean() if len(df_daily)>=200 else curr_p
-            rsi = df_daily['RSI'].iloc[-1]
-            
-            signal = "⏳ 定期定額持倉"
-            s_color = "gray"
-            if curr_p < ma60 and rsi < 40:
-                signal = "🎯 罕見超跌！啟動 20 萬資金加碼"
-                s_color = "red"
-            elif curr_p > ma60 * 1.2:
-                signal = "🔥 乖離過大，暫停單筆買進"
-                s_color = "orange"
-
             with st.container(border=True):
-                c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1.5])
-                icon = "🇺🇸" if is_us else "🇹🇼"
-                c1.markdown(f"**{icon} {code}**\n\n現價: {curr_p:.2f}")
-                c2.metric("季線 (60MA)", f"{ma60:.2f}")
-                c3.metric("年線 (200MA)", f"{ma200:.2f}")
-                c4.markdown(f"**佈局燈號**\n\n:{s_color}[{signal}] (RSI: {rsi:.1f})")
+                c1, c2, c3 = st.columns([1.5, 1.5, 1])
+                c1.markdown(f"**{'🇺🇸' if is_us else '🇹🇼'} {code}** | 現價: {curr_p:.2f}")
+                c2.metric("季線 (60MA)", f"{df_daily['Close'].tail(60).mean():.2f}")
+                c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}")
 
 # 引擎循環控制
 if auto_refresh:
