@@ -32,30 +32,65 @@ def get_full_stock_db():
     
 @st.cache_data(ttl=10)
 def get_stock_data(code):
-    # 建立偽裝真人瀏覽器連線
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    })
+    # 偽裝成正常電腦瀏覽器
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    }
     
-    # 🚀 終極破解：不再瞎猜！自動輪流嘗試 上市(.TW) 與 上櫃(.TWO)
+    # 自動輪流嘗試 .TW (上市) 與 .TWO (上櫃)
     for suffix in [".TW", ".TWO"]:
         try:
-            ticker = yf.Ticker(f"{code}{suffix}", session=session)
-            # 一樣抓 5 天防時區 Bug
-            df_1m = ticker.history(period="5d", interval="1m")
-            df_daily = ticker.history(period="1mo", interval="1d")
+            # 1. ⚡ 直連 Yahoo 底層 API 抓取 1K 資料 (抓5天防時區 Bug)
+            url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
+            res_1m = requests.get(url_1m, headers=headers, timeout=5)
+            data_1m = res_1m.json()
             
-            # 如果這個後綴成功抓到資料，就進行處理並回傳
-            if df_1m is not None and not df_1m.empty:
+            # 如果這個後綴找不到資料，就跳過換下一個
+            if not data_1m.get('chart', {}).get('result'):
+                continue 
+            
+            result_1m = data_1m['chart']['result'][0]
+            if 'timestamp' not in result_1m:
+                continue
+                
+            # 將時間戳轉換為台灣時間的 DataFrame
+            idx = pd.to_datetime(result_1m['timestamp'], unit='s', utc=True).tz_convert('Asia/Taipei')
+            quote_1m = result_1m['indicators']['quote'][0]
+            df_1m = pd.DataFrame({
+                'High': quote_1m['high'], 
+                'Low': quote_1m['low'], 
+                'Close': quote_1m['close'], 
+                'Volume': quote_1m['volume']
+            }, index=idx).dropna()
+            
+            # 只保留最新一天的資料
+            if not df_1m.empty:
                 last_day = df_1m.index[-1].date()
                 df_1m = df_1m[df_1m.index.date == last_day]
-                return df_1m, df_daily
-        except:
-            # 如果失敗 (例如拿 8183.TW 去查)，就安靜地換下一個 (.TWO) 繼續試
-            continue 
+            else:
+                continue
+
+            # 2. ⚡ 直連 Yahoo 底層 API 抓取 日K 資料
+            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=1mo"
+            res_1d = requests.get(url_1d, headers=headers, timeout=5)
+            data_1d = res_1d.json()
             
-    # 真的兩個都找不到，才宣告失敗
+            df_daily = pd.DataFrame()
+            if data_1d.get('chart', {}).get('result'):
+                result_1d = data_1d['chart']['result'][0]
+                if 'timestamp' in result_1d:
+                    quote_1d = result_1d['indicators']['quote'][0]
+                    df_daily = pd.DataFrame({'Close': quote_1d['close']}).dropna()
+
+            # 成功抓到就回傳！
+            return df_1m, df_daily
+
+        except Exception as e:
+            # 如果發生錯誤，安靜地繼續嘗試下一個後綴
+            continue
+            
+    # 如果 .TW 和 .TWO 都徹底失敗，才回傳空值
     return None, None
 
 # 🚀 全新強大的 AI 投顧選股引擎
@@ -201,6 +236,7 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
 
 
 
