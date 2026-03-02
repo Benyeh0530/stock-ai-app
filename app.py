@@ -48,7 +48,6 @@ def save_watchlist(tw, us):
             json.dump({"tw": tw, "us": us}, f, ensure_ascii=False)
     except: pass
 
-# 狀態初始化 (讀取永久記憶)
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     st.session_state.tw_stocks = data.get("tw", [])
@@ -216,14 +215,15 @@ with st.sidebar:
             code = selected_tw.split(" ")[0]
             name = " ".join(selected_tw.split(" ")[1:])
             if code not in [s['code'] for s in st.session_state.tw_stocks]:
-                st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": 0.0, "alert_triggered": False})
+                # 🚀 預設給予 ">=" (漲破) 的條件
+                st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": 0.0, "condition": ">=", "alert_triggered": False})
                 save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                 st.rerun()
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if st.button("➕ 加入美股"):
         if us_code and us_code not in [s['code'] for s in st.session_state.us_stocks]:
-            st.session_state.us_stocks.append({"code": us_code, "name": us_code, "target_price": 0.0, "alert_triggered": False})
+            st.session_state.us_stocks.append({"code": us_code, "name": us_code, "target_price": 0.0, "condition": ">=", "alert_triggered": False})
             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
             st.rerun()
             
@@ -254,7 +254,9 @@ elif getattr(st.session_state, 'ai_report', None):
                                 target_list = st.session_state.us_stocks if "美股" in category else st.session_state.tw_stocks
                                 if stock['code'] not in [s['code'] for s in target_list]:
                                     t_price = extract_price(stock.get('price', '0'))
-                                    target_list.append({"code": stock['code'], "name": stock.get('name', stock['code']), "target_price": t_price, "alert_triggered": False})
+                                    # 🚀 AI 帶入時，若是「作空」，自動預設為 "<=" (跌破)
+                                    default_cond = "<=" if "作空" in category else ">="
+                                    target_list.append({"code": stock['code'], "name": stock.get('name', stock['code']), "target_price": t_price, "condition": default_cond, "alert_triggered": False})
                                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
 
@@ -268,6 +270,7 @@ with tab_tw:
     for idx, stock in enumerate(st.session_state.tw_stocks):
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
+        cond = stock.get('condition', '>=') # 取出監控方向，預設為 >=
         
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
@@ -277,21 +280,34 @@ with tab_tw:
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
+            # 🚀 升級版：多空雙向價格監控引擎
             is_alert = False
             if t_price > 0:
-                if curr_p >= t_price:
-                    is_alert = True
-                    if not stock.get('alert_triggered', False):
-                        msg = f"🚨 【台股到價通知】\n{name}({code}) 已達目標價！\n現價：{curr_p}\n警示價：{t_price}"
-                        send_telegram_alert(msg)
-                        st.session_state.tw_stocks[idx]['alert_triggered'] = True
+                if cond == ">=": # 漲破觸發
+                    if curr_p >= t_price:
+                        is_alert = True
+                        if not stock.get('alert_triggered', False):
+                            msg = f"📈 🚨【台股作多/停損】\n{name}({code}) 已『漲破』目標價！\n現價：{curr_p}\n警示價：{t_price}"
+                            send_telegram_alert(msg)
+                            st.session_state.tw_stocks[idx]['alert_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    elif curr_p < t_price * 0.995: # 退回安全區才重置
+                        st.session_state.tw_stocks[idx]['alert_triggered'] = False
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                elif curr_p < t_price * 0.99: 
-                    st.session_state.tw_stocks[idx]['alert_triggered'] = False
-                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                
+                elif cond == "<=": # 跌破觸發
+                    if curr_p <= t_price:
+                        is_alert = True
+                        if not stock.get('alert_triggered', False):
+                            msg = f"📉 🚨【台股作空/停損】\n{name}({code}) 已『跌穿』目標價！\n現價：{curr_p}\n警示價：{t_price}"
+                            send_telegram_alert(msg)
+                            st.session_state.tw_stocks[idx]['alert_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    elif curr_p > t_price * 1.005: # 反彈回安全區才重置
+                        st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
             with st.container(border=True):
-                # 📌 標題區與「單獨移除按鈕」
                 c_title, c_del = st.columns([5, 1])
                 with c_title: st.markdown(f"#### {name}({code})")
                 with c_del:
@@ -301,29 +317,39 @@ with tab_tw:
                         st.rerun()
 
                 if is_alert:
-                    st.error(f"🚨 **到價警示！** {name} 已碰觸或越過目標價 {t_price}")
+                    st.error(f"🚨 **到價警示！** {name} 已觸發條件：現價 {curr_p} {cond} 目標 {t_price}")
                 
-                # 📌 設定價格區與「手動一鍵算價」
-                c_inp, c_ai = st.columns([2, 1])
+                # 🚀 新增：方向選擇器 + 價格輸入框 + AI 算價
+                c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
+                with c_cond:
+                    new_cond = st.selectbox("監控方向", [">= 漲破", "<= 跌破"], index=0 if cond == ">=" else 1, key=f"cond_tw_{code}")
+                    new_cond_val = ">=" if ">=" in new_cond else "<="
+                    if new_cond_val != cond:
+                        st.session_state.tw_stocks[idx]['condition'] = new_cond_val
+                        st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
                 with c_inp:
-                    new_t_price = st.number_input(f"目標警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
+                    new_t_price = st.number_input(f"警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
                     if new_t_price != t_price:
                         st.session_state.tw_stocks[idx]['target_price'] = new_t_price
                         st.session_state.tw_stocks[idx]['alert_triggered'] = False
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 with c_ai:
-                    if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_{code}"):
-                        with st.spinner("算價中..."):
+                    st.write("") # 排版對齊用
+                    if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
+                        with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給一個當沖停利目標價，只回傳數字。").text
+                                dir_txt = "作多停利" if cond == ">=" else "作空停利"
+                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給一個當沖的{dir_txt}目標價，只回傳數字。").text
                                 p_match = extract_price(res)
                                 if p_match > 0:
                                     st.session_state.tw_stocks[idx]['target_price'] = p_match
                                     st.session_state.tw_stocks[idx]['alert_triggered'] = False
                                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
-                            except: st.error("API繁忙")
+                            except: pass
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
@@ -338,27 +364,40 @@ with tab_us:
     for idx, stock in enumerate(st.session_state.us_stocks):
         code = stock['code']
         t_price = stock.get('target_price', 0.0)
+        cond = stock.get('condition', '>=')
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
         if not df_daily.empty:
             curr_p = df_daily['Close'].iloc[-1]
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             
+            # 🚀 美股多空雙向監控
             is_alert = False
             if t_price > 0:
-                if curr_p >= t_price:
-                    is_alert = True
-                    if not stock.get('alert_triggered', False):
-                        msg = f"🦅 【美股到價通知】\n{code} 已達目標價！\n現價：${curr_p}\n警示價：${t_price}"
-                        send_telegram_alert(msg)
-                        st.session_state.us_stocks[idx]['alert_triggered'] = True
+                if cond == ">=":
+                    if curr_p >= t_price:
+                        is_alert = True
+                        if not stock.get('alert_triggered', False):
+                            msg = f"🦅 📈【美股作多】\n{code} 已漲破目標價！\n現價：${curr_p}\n警示價：${t_price}"
+                            send_telegram_alert(msg)
+                            st.session_state.us_stocks[idx]['alert_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    elif curr_p < t_price * 0.995:
+                        st.session_state.us_stocks[idx]['alert_triggered'] = False
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                elif curr_p < t_price * 0.99:
-                    st.session_state.us_stocks[idx]['alert_triggered'] = False
-                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                elif cond == "<=":
+                    if curr_p <= t_price:
+                        is_alert = True
+                        if not stock.get('alert_triggered', False):
+                            msg = f"🦅 📉【美股作空/停損】\n{code} 已跌穿目標價！\n現價：${curr_p}\n警示價：${t_price}"
+                            send_telegram_alert(msg)
+                            st.session_state.us_stocks[idx]['alert_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    elif curr_p > t_price * 1.005:
+                        st.session_state.us_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
             with st.container(border=True):
-                # 📌 標題與刪除按鈕
                 c_title, c_del = st.columns([5, 1])
                 with c_title: st.markdown(f"#### 🦅 {code} (美股)")
                 with c_del:
@@ -368,29 +407,38 @@ with tab_us:
                         st.rerun()
 
                 if is_alert:
-                    st.error(f"🚨 **到價警示！** {code} 已碰觸或越過目標價 ${t_price}")
+                    st.error(f"🚨 **到價警示！** {code} 已觸發條件：現價 ${curr_p} {cond} 目標 ${t_price}")
                 
-                # 📌 設定價格區與「手動一鍵算價」
-                c_inp, c_ai = st.columns([2, 1])
+                c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
+                with c_cond:
+                    new_cond = st.selectbox("監控方向", [">= 漲破", "<= 跌破"], index=0 if cond == ">=" else 1, key=f"cond_us_{code}")
+                    new_cond_val = ">=" if ">=" in new_cond else "<="
+                    if new_cond_val != cond:
+                        st.session_state.us_stocks[idx]['condition'] = new_cond_val
+                        st.session_state.us_stocks[idx]['alert_triggered'] = False
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.rerun()
                 with c_inp:
-                    new_t_price = st.number_input(f"目標警示價", value=float(t_price), step=1.0, key=f"inp_us_{code}")
+                    new_t_price = st.number_input(f"警示價", value=float(t_price), step=1.0, key=f"inp_us_{code}")
                     if new_t_price != t_price:
                         st.session_state.us_stocks[idx]['target_price'] = new_t_price
                         st.session_state.us_stocks[idx]['alert_triggered'] = False
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 with c_ai:
-                    if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
-                        with st.spinner("算價中..."):
+                    st.write("") 
+                    if API_KEY and st.button("🤖 算價", key=f"ai_p_us_{code}"):
+                        with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，請給一個波段停利目標價，只回傳數字。").text
+                                dir_txt = "作多" if cond == ">=" else "作空/停損"
+                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，請給一個波段的{dir_txt}目標價，只回傳數字。").text
                                 p_match = extract_price(res)
                                 if p_match > 0:
                                     st.session_state.us_stocks[idx]['target_price'] = p_match
                                     st.session_state.us_stocks[idx]['alert_triggered'] = False
                                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
-                            except: st.error("API繁忙")
+                            except: pass
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
@@ -413,7 +461,6 @@ with tab_core:
                 c2.metric("季線 (60MA)", f"{df_daily['Close'].tail(60).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}")
 
-# 引擎循環控制 (只有網頁開著的時候才會執行倒數與重整)
 if auto_refresh:
     time.sleep(3) 
     st.rerun()
