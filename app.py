@@ -14,13 +14,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    # 使用最新穩定的 2.5 版本模型
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 2. 核心數據引擎 ---
 @st.cache_data(ttl=3600)
 def get_full_stock_db():
-    """從政府 OpenAPI 抓取全台股清單，用來對照股票名稱"""
     db = {}
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=10, verify=False)
@@ -32,16 +30,14 @@ def get_full_stock_db():
 
 @st.cache_data(ttl=10)
 def get_stock_data(code):
-    """🚀 終極核彈版：直連 Yahoo 底層 JSON，完全防封鎖，並自動運算 15K MA"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
     }
     
-    # 自動雙面嘗試上市與上櫃
     for suffix in [".TW", ".TWO"]:
         try:
-            # 1. 抓取 5 天的 1 分鐘資料
+            # 抓取 5 天的 1 分鐘資料，以防時區與開盤判定 Bug
             url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
             res_1m = requests.get(url_1m, headers=headers, timeout=5)
             data_1m = res_1m.json()
@@ -62,15 +58,15 @@ def get_stock_data(code):
             
             if df_1m_all.empty: continue
 
-            # --- 計算 15K 20MA (包含昨日籌碼) ---
+            # 計算 15K 20MA (跨日濃縮計算)
             df_15m = df_1m_all['Close'].resample('15min').last().dropna()
             ma20_15k = df_15m.tail(20).mean() if len(df_15m) >= 20 else df_15m.mean()
 
-            # --- 切割出「今日」的 1 分鐘資料供即時當日均線使用 ---
+            # 切割出當日資料供 VWAP 與即時 K 線使用
             last_day = df_1m_all.index[-1].date()
             df_1m_today = df_1m_all[df_1m_all.index.date == last_day]
 
-            # 2. 抓取日 K 資料
+            # 抓取日 K 資料供位階與波段判定使用
             url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=1mo"
             res_1d = requests.get(url_1d, headers=headers, timeout=5)
             data_1d = res_1d.json()
@@ -86,10 +82,8 @@ def get_stock_data(code):
 
         except Exception as e:
             continue
-            
     return None, None, None
 
-# 🚀 AI 投顧選股報告
 def get_advanced_ai_report():
     if not API_KEY: return "⚠️ 請先設定 API Key"
     tw_tz = pytz.timezone('Asia/Taipei')
@@ -117,12 +111,15 @@ def get_advanced_ai_report():
         return f"AI 分析連線失敗: {e}"
 
 # --- 3. 網頁介面 ---
-st.title("⚡ AI 智能監控 (終極完整版)")
+st.title("⚡ AI 智能監控戰情室")
 
+# 初始化記憶體 (確保資料切換不消失)
 if 'stocks' not in st.session_state: st.session_state.stocks = []
+if 'logs' not in st.session_state: st.session_state.logs = []
 
 all_stocks = get_full_stock_db()
 
+# --- 側邊欄 ---
 with st.sidebar:
     st.header("🤖 AI 獨家選股報告")
     if st.button("🚀 立即生成全盤選股報告", use_container_width=True, type="primary"):
@@ -132,23 +129,30 @@ with st.sidebar:
     st.divider()
     
     st.header("🎯 自訂監控選單")
-    # 💡 終極防呆機制：自動清除多餘的英文與小數點，只保留數字
-    raw_input = st.text_input("輸入代碼 (如: 8183)").strip()
-    input_code = raw_input.upper().replace(".TW", "").replace(".TWO", "")
     
-    if input_code and input_code in all_stocks:
-        st.write(f"✅ 已選取: {all_stocks[input_code]}")
-        
+    # --- 🚀 全新模糊搜尋下拉選單 ---
+    stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
+    selected_stock = st.selectbox(
+        "🔍 支援代碼或中文字搜尋", 
+        options=["請點此搜尋..."] + stock_list,
+        index=0
+    )
+    
     if st.button("➕ 加入即時監控"):
-        if input_code and input_code not in [s['code'] for s in st.session_state.stocks]:
-            st.session_state.stocks.append({"code": input_code, "name": all_stocks.get(input_code, "股票")})
-            st.rerun()
+        if selected_stock and selected_stock != "請點此搜尋...":
+            input_code = selected_stock.split(" ")[0]
+            input_name = " ".join(selected_stock.split(" ")[1:])
+            
+            if input_code not in [s['code'] for s in st.session_state.stocks]:
+                st.session_state.stocks.append({"code": input_code, "name": input_name})
+                st.rerun()
     
-    if st.button("🗑️ 清空監控清單"):
+    if st.button("🗑️ 清空監控與日誌"):
         st.session_state.stocks = []
+        st.session_state.logs = [] 
         st.rerun()
 
-# 主畫面佈局
+# --- 報告載入區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
     st.subheader("🤖 AI 正在深度運算全台股數據 (約需 10~20 秒)...")
     with st.spinner('過濾 150 元以下標的...'):
@@ -163,6 +167,7 @@ elif getattr(st.session_state, 'ai_report', None):
 
 st.divider()
 
+# --- 頂端控制區 ---
 t_col1, t_col2 = st.columns([1, 1])
 with t_col1:
     if st.button("🔄 手動刷新即時股價"):
@@ -172,9 +177,10 @@ with t_col2:
     tw_tz = pytz.timezone('Asia/Taipei')
     st.write(f"⏱️ 股價更新時間: {datetime.datetime.now(tw_tz).strftime('%H:%M:%S')}")
 
+# --- 主戰情看板 ---
 st.subheader("📺 即時戰情看板")
 if not st.session_state.stocks:
-    st.info("請於側邊欄輸入純數字代碼 (如 8183) 加入監控。")
+    st.info("請於左側選單搜尋並加入您想監控的標的。")
 else:
     for stock in st.session_state.stocks:
         code = stock['code']
@@ -188,9 +194,32 @@ else:
             high_p = df_1m['High'].max()
             low_p = df_1m['Low'].min()
             
-            # 真實當日均價 (VWAP)
+            # --- 全日歷史爆量掃描 (5K / 15K) ---
+            vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
+            vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
+            
+            if len(vol_5m) > 0:
+                avg_5m = vol_5m.mean()
+                for ts, vol in vol_5m.items():
+                    if vol > avg_5m * 2.5 and vol > 100:
+                        time_str = ts.strftime("%H:%M")
+                        msg = f"[{time_str}] ⚡ {name}({code}) | 5分K爆量: {int(vol)}張"
+                        if msg not in [l['msg'] for l in st.session_state.logs]:
+                            st.session_state.logs.append({"time": time_str, "msg": msg})
+
+            if len(vol_15m) > 0:
+                avg_15m = vol_15m.mean()
+                for ts, vol in vol_15m.items():
+                    if vol > avg_15m * 2.5 and vol > 200:
+                        time_str = ts.strftime("%H:%M")
+                        msg = f"[{time_str}] 🔥 {name}({code}) | 15分K爆量: {int(vol)}張"
+                        if msg not in [l['msg'] for l in st.session_state.logs]:
+                            st.session_state.logs.append({"time": time_str, "msg": msg})
+            
+            # 計算當日真實均價 (VWAP)
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
             
+            # 顯示 UI 卡片
             with st.container(border=True):
                 c1, c2, c3 = st.columns(3)
                 c1.metric(f"{name}({code})", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
@@ -209,3 +238,14 @@ else:
                     st.markdown(f"🌙 **隔日沖判定**: {n_msg} ({pos*100:.1f}%)")
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
+
+# --- 主力帶量日誌區 ---
+st.divider()
+st.subheader("🔔 帶量異常歷史紀錄 (5K / 15K)")
+if st.session_state.logs:
+    # 根據時間降冪排序，最新爆量在最上方
+    sorted_logs = sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)
+    log_text = "\n\n".join([l['msg'] for l in sorted_logs])
+    st.text_area("今日爆量軌跡", value=log_text, height=200)
+else:
+    st.info("目前無異常爆量訊號。系統持續監控中...")
