@@ -5,6 +5,8 @@ import datetime
 import requests
 import urllib3
 import pytz
+import json
+import re
 
 # --- 基礎設定 ---
 st.set_page_config(page_title="AI 智能監控戰情室", layout="wide", initial_sidebar_state="expanded")
@@ -37,7 +39,6 @@ def get_stock_data(code):
     
     for suffix in [".TW", ".TWO"]:
         try:
-            # 抓取 5 天的 1 分鐘資料，以防時區與開盤判定 Bug
             url_1m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
             res_1m = requests.get(url_1m, headers=headers, timeout=5)
             data_1m = res_1m.json()
@@ -58,15 +59,12 @@ def get_stock_data(code):
             
             if df_1m_all.empty: continue
 
-            # 計算 15K 20MA (跨日濃縮計算)
             df_15m = df_1m_all['Close'].resample('15min').last().dropna()
             ma20_15k = df_15m.tail(20).mean() if len(df_15m) >= 20 else df_15m.mean()
 
-            # 切割出當日資料供 VWAP 與即時 K 線使用
             last_day = df_1m_all.index[-1].date()
             df_1m_today = df_1m_all[df_1m_all.index.date == last_day]
 
-            # 抓取日 K 資料供位階與波段判定使用
             url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=1mo"
             res_1d = requests.get(url_1d, headers=headers, timeout=5)
             data_1d = res_1d.json()
@@ -85,35 +83,49 @@ def get_stock_data(code):
     return None, None, None
 
 def get_advanced_ai_report():
-    if not API_KEY: return "⚠️ 請先設定 API Key"
+    if not API_KEY: return {"error": "⚠️ 請先設定 API Key"}
     tw_tz = pytz.timezone('Asia/Taipei')
     now = datetime.datetime.now(tw_tz)
     is_after_1230 = now.time() >= datetime.time(12, 30)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    # 🚀 將 Prompt 改為嚴格的 JSON 數據結構要求
     prompt = f"""
     現在是台灣時間 {time_str}。你是頂尖台股操盤手。
-    請給出一份實戰選股報告。
-    【限制條件】：所有推薦股票必須在 150 元以下！請給出明確進場價位。繁體中文條列式。
-    
-    ### 📈 1. 當沖作多推薦 (5檔)
-    ### 📉 2. 當沖作空推薦 (5檔)
-    ### 🌊 3. 波段操作推薦 (5檔) (須包含法人動態與熱門產業分析)
+    請嚴格依照以下 JSON 格式回傳一份實戰選股報告。不要包含任何 markdown 語法 (如 ```json) 或其他解釋文字，只能輸出純 JSON。
+    【限制條件】：所有推薦股票必須在 150 元（含）以下！
+
+    JSON 格式如下：
+    {{
+      "當沖作多": [
+        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "看多理由"}}
+      ],
+      "當沖作空": [
+        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "看空理由"}}
+      ],
+      "波段操作": [
+        {{"code": "代碼", "name": "名稱", "price": "進場區間", "reason": "法人動態與產業分析"}}
+      ],
+      "隔日沖": [
+        {{"code": "代碼", "name": "名稱", "price": "建議價位", "reason": "尾盤鎖碼分析"}}
+      ]
+    }}
     """
-    if is_after_1230:
-        prompt += "\n### 🌙 4. 隔日沖推薦 (5檔) (尾盤鎖碼標的)"
-    else:
-        prompt += "\n### 🌙 4. 隔日沖推薦 (⚠️ 目前時間未達 12:30，暫不提供)"
+    if not is_after_1230:
+        prompt += "\n注意：目前時間未達 12:30，請將「隔日沖」的值設為空陣列 []。"
 
     try:
-        return ai_model.generate_content(prompt).text
+        response = ai_model.generate_content(prompt).text
+        # 自動清理 AI 可能多加的 markdown 標記
+        match = re.search(r'\{.*\}', response, re.DOTALL)
+        json_str = match.group(0) if match else response
+        return json.loads(json_str)
     except Exception as e: 
-        return f"AI 分析連線失敗: {e}"
+        return {"error": f"AI 產出格式錯誤，請重新產生。錯誤碼: {e}"}
 
 # --- 3. 網頁介面 ---
 st.title("⚡ AI 智能監控戰情室")
 
-# 初始化記憶體 (確保資料切換不消失)
 if 'stocks' not in st.session_state: st.session_state.stocks = []
 if 'logs' not in st.session_state: st.session_state.logs = []
 
@@ -129,8 +141,6 @@ with st.sidebar:
     st.divider()
     
     st.header("🎯 自訂監控選單")
-    
-    # --- 🚀 全新模糊搜尋下拉選單 ---
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     selected_stock = st.selectbox(
         "🔍 支援代碼或中文字搜尋", 
@@ -152,16 +162,42 @@ with st.sidebar:
         st.session_state.logs = [] 
         st.rerun()
 
-# --- 報告載入區 ---
+# --- 🚀 全新結構化報告載入區 ---
 if getattr(st.session_state, 'ai_report', None) == "loading":
-    st.subheader("🤖 AI 正在深度運算全台股數據 (約需 10~20 秒)...")
+    st.subheader("🤖 AI 正在深度運算並建立選股資料庫 (約需 10~20 秒)...")
     with st.spinner('過濾 150 元以下標的...'):
         st.session_state.ai_report = get_advanced_ai_report()
     st.rerun()
 elif getattr(st.session_state, 'ai_report', None):
-    with st.expander("🌟 點我收起 / 展開【AI 深度選股報告】", expanded=True):
-        st.markdown(st.session_state.ai_report)
-        if st.button("關閉報告"):
+    report_data = st.session_state.ai_report
+    
+    with st.container(border=True):
+        st.subheader("🤖 AI 精選清單 (點擊看詳細分析)")
+        
+        if "error" in report_data:
+            st.error(report_data["error"])
+        else:
+            # 建立四個分類的頁籤 (Tabs)，在手機上滑動超方便
+            tabs = st.tabs(list(report_data.keys()))
+            
+            for i, (category, stocks) in enumerate(report_data.items()):
+                with tabs[i]:
+                    if not stocks:
+                        st.info("時間未達或目前無符合條件的標的。")
+                    
+                    for stock in stocks:
+                        # 將每檔股票變成可點擊展開的手風琴 (Expander)
+                        with st.expander(f"🎯 {stock['name']} ({stock['code']}) | 參考價: {stock.get('price', '--')}"):
+                            st.write(f"**詳細分析**：\n{stock.get('reason', '無詳細說明')}")
+                            
+                            # ✨ 魔法按鈕：直接從報告加入即時監控
+                            if st.button(f"➕ 加入 {stock['name']} 到下方看板", key=f"add_ai_{category}_{stock['code']}"):
+                                if stock['code'] not in [s['code'] for s in st.session_state.stocks]:
+                                    st.session_state.stocks.append({"code": stock['code'], "name": stock['name']})
+                                    st.rerun()
+                                    
+        st.divider()
+        if st.button("✖️ 關閉報告"):
             st.session_state.ai_report = None
             st.rerun()
 
@@ -194,7 +230,6 @@ else:
             high_p = df_1m['High'].max()
             low_p = df_1m['Low'].min()
             
-            # --- 全日歷史爆量掃描 (5K / 15K) ---
             vol_5m = df_1m['Volume'].resample('5min').sum().dropna()
             vol_15m = df_1m['Volume'].resample('15min').sum().dropna()
             
@@ -216,10 +251,8 @@ else:
                         if msg not in [l['msg'] for l in st.session_state.logs]:
                             st.session_state.logs.append({"time": time_str, "msg": msg})
             
-            # 計算當日真實均價 (VWAP)
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / df_1m['Volume'].sum()
             
-            # 顯示 UI 卡片
             with st.container(border=True):
                 c1, c2, c3 = st.columns(3)
                 c1.metric(f"{name}({code})", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
@@ -239,11 +272,9 @@ else:
         else:
             st.warning(f"⚠️ {code} 數據獲取受限，請稍候刷新。")
 
-# --- 主力帶量日誌區 ---
 st.divider()
 st.subheader("🔔 帶量異常歷史紀錄 (5K / 15K)")
 if st.session_state.logs:
-    # 根據時間降冪排序，最新爆量在最上方
     sorted_logs = sorted(st.session_state.logs, key=lambda x: x['time'], reverse=True)
     log_text = "\n\n".join([l['msg'] for l in sorted_logs])
     st.text_area("今日爆量軌跡", value=log_text, height=200)
