@@ -180,7 +180,6 @@ def fetch_ai_list(report_type):
         return json.loads(match.group(0))
     except: return None
 
-# 🚀 族群連動 AI 引擎 (快取 24 小時)
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
@@ -288,6 +287,16 @@ with tab_tw:
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
+            # 🚀 5K / 15K 爆量動能偵測引擎
+            vol_alert_msg = ""
+            if len(df_1m) >= 15:
+                avg_vol_1m = df_1m['Volume'].mean()
+                if avg_vol_1m > 0:
+                    vol_5m = df_1m['Volume'].tail(5).sum()
+                    vol_15m = df_1m['Volume'].tail(15).sum()
+                    if vol_5m > (avg_vol_1m * 5 * 2.5): vol_alert_msg += "🔥 5K急行爆量！ "
+                    if vol_15m > (avg_vol_1m * 15 * 2.0): vol_alert_msg += "🔥 15K波段爆量！"
+            
             is_alert = False
             if t_price > 0:
                 if cond == ">=" and curr_p >= t_price:
@@ -311,6 +320,7 @@ with tab_tw:
                 with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
+                if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg}") # 🚀 顯示爆量警訊
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
                 with c_cond:
@@ -344,7 +354,6 @@ with tab_tw:
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
-                # 🚀 新增：高度連動族群顯示區
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -426,7 +435,6 @@ with tab_us:
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
                 
-                # 🚀 新增：高度連動族群顯示區 (美股)
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
