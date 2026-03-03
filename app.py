@@ -13,10 +13,10 @@ import copy
 import numpy as np
 
 # --- 基礎設定 ---
-st.set_page_config(page_title="AI 智能監控戰情室", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 1. 引擎設定 (AI 與 Telegram) ---
+# --- 1. 引擎設定 ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if API_KEY:
     genai.configure(api_key=API_KEY)
@@ -31,7 +31,7 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 💾 永久記憶資料庫系統 ---
+# --- 💾 永久記憶資料庫 ---
 DATA_FILE = "watchlist_data.json"
 
 def load_watchlist():
@@ -46,7 +46,7 @@ def save_watchlist(tw, us):
         with open(DATA_FILE, "w", encoding='utf-8') as f: json.dump({"tw": tw, "us": us}, f, ensure_ascii=False)
     except: pass
 
-# --- 🚀 防彈按鈕 Callback 函數 ---
+# --- 🚀 防彈按鈕 Callbacks ---
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     if code and code not in [s['code'] for s in st.session_state.tw_stocks]:
         st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False})
@@ -68,18 +68,21 @@ def cb_remove_us(idx):
 def cb_clear_all():
     st.session_state.tw_stocks = []
     st.session_state.us_stocks = []
-    st.session_state.logs = []
+    st.session_state.ai_report_dt = None
+    st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
+# 初始化
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     st.session_state.tw_stocks = data.get("tw", [])
     st.session_state.us_stocks = data.get("us", [])
-    st.session_state.logs = []
+    st.session_state.ai_report_dt = None
+    st.session_state.ai_report_swing = None
     st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
     st.session_state.initialized = True
 
-# --- 2. 核心數據引擎 ---
+# --- 2. 數據引擎 ---
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
@@ -151,94 +154,39 @@ def get_realtime_tick(code, suffix):
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=5)
-def get_quick_quote(code, is_us=False):
-    stock_db = get_full_stock_db()
-    name = code if is_us else stock_db.get(code, code)
+def get_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suffix in suffixes:
         try:
             res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d", headers=headers, timeout=2).json()
             closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
-            if len(closes) >= 2: return closes[-1], closes[-2], name
+            if len(closes) >= 2: return closes[-1], closes[-2]
         except: continue
-    return None, None, name
+    return None, None
 
-# --- 🚀 報告額度防護系統 (分離 AI 與即時報價) ---
-
-@st.cache_data(ttl=3600) # 當沖名單：快取 1 小時，避免重複扣額度
-def fetch_raw_daytrade_ai():
-    if not API_KEY: return {"error": "⚠️ 請設定 API Key"}
-    now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
-    prompt = f"""時間 {now}。你是台股當沖高手。
-    請依照 JSON 格式回傳。要求：1. 台股150元以下。2. 各類別精準5檔且不重複。3. 找高震幅活躍股。
-    JSON: {{ "台股當沖作多": [ 5筆資料 ], "台股當沖作空": [ 5筆資料 ] }} 
-    (格式：{{"code": "代碼", "name": "名稱", "strategy": "判斷基準", "reason": "理由"}})"""
+@st.cache_data(ttl=43200)
+def fetch_ai_list(report_type):
+    if not API_KEY: return None
+    now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
+    if report_type == "daytrade":
+        prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空標的。限150元以下。找尋高波動活躍股。JSON: {{ '台股當沖作多': [], '台股當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '理由'}})"
+    else:
+        prompt = f"時間 {now}。你是跨國波段操盤手。提供5檔美股短波、5檔台股資金熱點。台股限150元以下。JSON: {{ '美股短波分析': [], '資金熱點TOP5': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '理由'}})"
+    
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
-        return json.loads(match.group(0) if match else response)
-    except Exception as e:
-        if "429" in str(e): return {"error": "🚨 Google API 額度滿了。請稍後再試。"}
-        return {"error": f"API 錯誤: {e}"}
+        return json.loads(match.group(0))
+    except: return None
 
-def get_ai_daytrade_report():
-    raw_data = fetch_raw_daytrade_ai()
-    if "error" in raw_data: return raw_data
-    data = copy.deepcopy(raw_data) # 深拷貝，避免修改到快取本體
-    
-    # Python 即時抓價，保證報價永遠最新，目標價不亂掰
-    for cat, stocks in data.items():
-        for s in stocks:
-            c_p, _, _ = get_quick_quote(s['code'], False)
-            if c_p:
-                s['curr_p'] = c_p
-                s['price'] = round(c_p * 1.015, 2) if "多" in cat else round(c_p * 0.985, 2)
-            else:
-                s['curr_p'] = "未知"
-                s['price'] = 0.0
-    return data
-
-@st.cache_data(ttl=43200) # 波段熱點名單：快取 12 小時 (極度省額度)
-def fetch_raw_swing_ai():
-    if not API_KEY: return {"error": "⚠️ 請設定 API Key"}
-    now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
-    prompt = f"""時間 {now}。你是跨國波段操盤手。
-    請依照 JSON 格式回傳。要求：台股限150元以下。各類別精準5檔且不重複。
-    JSON: {{ "美股短波分析": [ 5筆資料 ], "資金熱點TOP5": [ 5筆資料 ] }} 
-    (格式：{{"code": "代碼", "name": "名稱", "strategy": "判斷基準", "reason": "理由"}})"""
-    try:
-        response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        return json.loads(match.group(0) if match else response)
-    except Exception as e:
-        if "429" in str(e): return {"error": "🚨 Google API 額度滿了。請稍後再試。"}
-        return {"error": f"API 錯誤: {e}"}
-
-def get_ai_swing_report():
-    raw_data = fetch_raw_swing_ai()
-    if "error" in raw_data: return raw_data
-    data = copy.deepcopy(raw_data)
-    
-    # Python 即時抓價
-    for cat, stocks in data.items():
-        is_us = "美股" in cat
-        for s in stocks:
-            c_p, _, _ = get_quick_quote(s['code'], is_us)
-            if c_p:
-                s['curr_p'] = c_p
-                s['price'] = round(c_p * 1.05, 2)
-            else:
-                s['curr_p'] = "未知"
-                s['price'] = 0.0
-    return data
-
-@st.cache_data(ttl=86400) # 連動股：一天抓一次
+# 🚀 族群連動 AI 引擎 (快取 24 小時)
+@st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
     try:
-        res = ai_model.generate_content(f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。回傳純代碼逗號分隔。", generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        res = ai_model.generate_content(f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。回傳純代碼逗號分隔，不要多餘文字。", generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
     except: return []
 
@@ -246,12 +194,12 @@ def extract_price(price_str):
     match = re.search(r'\d+(\.\d+)?', str(price_str))
     return float(match.group()) if match else 0.0
 
-# --- 3. 網頁介面 ---
+# --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
-
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
 
+# 頂部大盤溫度
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp:
@@ -261,29 +209,19 @@ with col_t2:
         st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
     tw_pct = market_temp.get('台股加權', (0,0))[1]
-    if tw_pct < -1.5: st.error("🚨 大盤重挫，當沖嚴控風險！")
-    elif tw_pct > 1.0: st.success("🔥 大盤順風：多方動能強勁。")
-    else: st.info("⚖️ 大盤震盪：關注族群輪動。")
+    if API_KEY: st.success("🟢 API 火力全開 (Tier 1)")
+    else: st.error("🔴 API 未設定")
 
 st.divider()
 
+# 側邊欄控制
 with st.sidebar:
-    st.header("⚙️ 實戰監控設定")
-    auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
-    st.divider()
-    
-    if TG_BOT_TOKEN and TG_CHAT_ID: st.success("📱 Telegram 推播已啟用")
-    else: st.warning("📱 尚未設定 Telegram (設定 st.secrets 即可啟用)")
-
-    st.divider()
-    st.header("🤖 AI 獨家選股報告")
+    st.header("🤖 選股報告分流")
     if st.button("🚀 生成【當沖短線】報告", use_container_width=True, type="primary"):
-        st.session_state.ai_report_data = "loading_dt"
-        st.rerun()
+        st.session_state.ai_report_dt = fetch_ai_list("daytrade")
     if st.button("🦅 生成【波段熱點】報告", use_container_width=True):
-        st.session_state.ai_report_data = "loading_swing"
-        st.rerun()
-        
+        st.session_state.ai_report_swing = fetch_ai_list("swing")
+    
     st.divider()
     st.header("🎯 自訂監控加入")
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
@@ -298,42 +236,38 @@ with st.sidebar:
         st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
             
     st.divider()
+    auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
     st.button("🗑️ 徹底清空所有資料", on_click=cb_clear_all, type="secondary")
 
-# --- 顯示 AI 報告區域 ---
-report_state = getattr(st.session_state, 'ai_report_data', None)
-if report_state == "loading_dt":
-    with st.spinner('掃描盤面高波動活躍股，計算合理當沖目標價...'):
-        st.session_state.ai_report_data = get_ai_daytrade_report()
-    st.rerun()
-elif report_state == "loading_swing":
-    with st.spinner('調閱跨國產業資金流向，計算波段滿足點...'):
-        st.session_state.ai_report_data = get_ai_swing_report()
-    st.rerun()
-elif isinstance(report_state, dict):
-    with st.container(border=True):
-        st.subheader("🤖 AI 精選清單 (已校正即時股價)")
-        if "error" in report_state: st.error(report_state["error"])
-        else:
-            tabs = st.tabs(list(report_state.keys()))
-            for i, (category, stocks) in enumerate(report_state.items()):
+# 顯示分流報告 (即時校正股價)
+for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
+    if report:
+        with st.container(border=True):
+            tabs = st.tabs(list(report.keys()))
+            for i, (cat, stocks) in enumerate(report.items()):
                 with tabs[i]:
-                    for stock in stocks:
-                        c_p = stock.get('curr_p', '--')
-                        t_p = stock.get('price', 0.0)
-                        display_title = f"🎯 {stock.get('name', '')}({stock.get('code', '')}) | 現價：{c_p} | 推算目標價：{t_p}"
-                        with st.expander(display_title):
-                            st.write(f"**策略理由**：{stock.get('strategy', '')}")
-                            st.write(f"**詳細分析**：{stock.get('reason', '')}")
-                            
-                            cond = "<=" if "空" in category else ">="
-                            is_us_cat = "美股" in category
-                            btn_text = f"➕ 帶入目標價 {t_p} 且監控 {'跌破' if cond=='<=' else '漲破'}"
-                            if is_us_cat:
-                                st.button(btn_text, key=f"add_u_{stock['code']}", on_click=cb_add_us, args=(stock['code'], stock.get('name', stock['code']), t_p, cond))
+                    for s in stocks:
+                        c_p, _ = get_live_price(s['code'], "美股" in cat)
+                        target = 0
+                        cond = ">="
+                        if c_p:
+                            if "空" in cat:
+                                target = round(c_p * 0.985, 2)
+                                cond = "<="
+                            elif "多" in cat:
+                                target = round(c_p * 1.015, 2)
                             else:
-                                st.button(btn_text, key=f"add_t_{stock['code']}", on_click=cb_add_tw, args=(stock['code'], stock.get('name', stock['code']), t_p, cond))
+                                target = round(c_p * 1.05, 2)
+                        
+                        with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 目標價: {target}"):
+                            st.write(f"**策略理由**：{s.get('strategy', '')}")
+                            btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
+                            if "美股" in cat:
+                                st.button(btn_txt, key=f"btn_u_{s['code']}", on_click=cb_add_us, args=(s['code'], s['name'], target, cond))
+                            else:
+                                st.button(btn_txt, key=f"btn_t_{s['code']}", on_click=cb_add_tw, args=(s['code'], s['name'], target, cond))
 
+# 監控分頁
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
 
 # ====================
@@ -374,11 +308,9 @@ with tab_tw:
             with st.container(border=True):
                 c_title, c_del = st.columns([5, 1])
                 with c_title: st.markdown(f"#### {name}({code})")
-                with c_del:
-                    st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
+                with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
-                if is_alert:
-                    st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
+                if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
                 with c_cond:
@@ -411,6 +343,16 @@ with tab_tw:
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
+                
+                # 🚀 新增：高度連動族群顯示區
+                corr_codes = get_correlated_stocks(code, name, is_us=False)
+                if corr_codes:
+                    corr_display = []
+                    for i, c in enumerate(corr_codes):
+                        c_name = all_stocks.get(c, c)
+                        icon = "👑 龍頭" if i == 0 else "🔗 連動"
+                        corr_display.append(f"{icon}: {c_name}({c})")
+                    st.caption(" | ".join(corr_display))
 
 # ====================
 # 戰區 2：美股波段戰情
@@ -448,11 +390,9 @@ with tab_us:
             with st.container(border=True):
                 c_title, c_del = st.columns([5, 1])
                 with c_title: st.markdown(f"#### 🦅 {code} (美股)")
-                with c_del:
-                    st.button("❌ 移除", key=f"del_us_{code}", on_click=cb_remove_us, args=(idx,))
+                with c_del: st.button("❌ 移除", key=f"del_us_{code}", on_click=cb_remove_us, args=(idx,))
 
-                if is_alert:
-                    st.error(f"🚨 **到價警示！** {code} 已觸發：現價 ${curr_p} {cond} 目標 ${t_price}")
+                if is_alert: st.error(f"🚨 **到價警示！** {code} 已觸發：現價 ${curr_p} {cond} 目標 ${t_price}")
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
                 with c_cond:
@@ -485,6 +425,15 @@ with tab_us:
                 c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
+                
+                # 🚀 新增：高度連動族群顯示區 (美股)
+                corr_codes = get_correlated_stocks(code, code, is_us=True)
+                if corr_codes:
+                    corr_display = []
+                    for i, c in enumerate(corr_codes):
+                        icon = "👑 龍頭" if i == 0 else "🔗 連動"
+                        corr_display.append(f"{icon}: {c}")
+                    st.caption(" | ".join(corr_display))
 
 # ====================
 # 戰區 3：10年核心資產
