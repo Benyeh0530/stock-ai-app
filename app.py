@@ -49,12 +49,12 @@ def save_watchlist(tw, us):
 # --- 🚀 防彈按鈕 Callbacks ---
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     if code and code not in [s['code'] for s in st.session_state.tw_stocks]:
-        st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False})
+        st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False, "ai_advice": ""})
         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_add_us(code, name, target_price=0.0, condition=">="):
     if code and code not in [s['code'] for s in st.session_state.us_stocks]:
-        st.session_state.us_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False})
+        st.session_state.us_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False, "ai_advice": ""})
         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_remove_tw(idx):
@@ -101,7 +101,7 @@ def get_market_temp():
     results = {}
     for code, name in indices.items():
         try:
-            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=2d"
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=2d&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=3).json()
             quotes = res['chart']['result'][0]['indicators']['quote'][0]['close']
             closes = [c for c in quotes if c is not None]
@@ -143,23 +143,25 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), None, ""
 
+# 🚀 移除快取，並加入 _t 破壞快取機制確保報價絕對即時更新
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res_1m = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d", headers=headers, timeout=3).json()
+        # 強制加入 timestamp 避免 Yahoo 伺服器回傳舊資料
+        res_1m = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d&_t={int(time.time())}", headers=headers, timeout=3).json()
         idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
         q = res_1m['chart']['result'][0]['indicators']['quote'][0]
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=5)
+# 🚀 移除快取確保連動股與最新價格即時跳動
 def get_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suffix in suffixes:
         try:
-            res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d", headers=headers, timeout=2).json()
+            res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d&_t={int(time.time())}", headers=headers, timeout=2).json()
             closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
             if len(closes) >= 2: return closes[-1], closes[-2]
         except: continue
@@ -189,16 +191,12 @@ def get_correlated_stocks(code, name, is_us=False):
         return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
     except: return []
 
-def extract_price(price_str):
-    match = re.search(r'\d+(\.\d+)?', str(price_str))
-    return float(match.group()) if match else 0.0
-
 # --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
 
-# 頂部大盤溫度
+# 頂部大盤溫度與更新時間
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp:
@@ -207,8 +205,7 @@ with col_t2:
     if '那斯達克' in market_temp:
         st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    tw_pct = market_temp.get('台股加權', (0,0))[1]
-    if API_KEY: st.success("🟢 API 火力全開 (Tier 1)")
+    if API_KEY: st.success(f"🟢 API 火力全開 | 最後更新: {datetime.datetime.now().strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
 st.divider()
@@ -278,6 +275,7 @@ with tab_tw:
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
         cond = stock.get('condition', '>=') 
+        ai_advice = stock.get('ai_advice', '') # 🚀 讀取專屬 AI 建議
         
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
@@ -287,15 +285,21 @@ with tab_tw:
             prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 5K / 15K 爆量動能偵測引擎
+            # 🚀 5K / 15K 爆量動能偵測引擎 (確保隨時顯示運作狀態)
             vol_alert_msg = ""
+            vol_info = ""
             if len(df_1m) >= 15:
+                df_1m['Volume'] = df_1m['Volume'].fillna(0)
                 avg_vol_1m = df_1m['Volume'].mean()
                 if avg_vol_1m > 0:
                     vol_5m = df_1m['Volume'].tail(5).sum()
                     vol_15m = df_1m['Volume'].tail(15).sum()
-                    if vol_5m > (avg_vol_1m * 5 * 2.5): vol_alert_msg += "🔥 5K急行爆量！ "
-                    if vol_15m > (avg_vol_1m * 15 * 2.0): vol_alert_msg += "🔥 15K波段爆量！"
+                    ratio_5k = vol_5m / (avg_vol_1m * 5)
+                    ratio_15k = vol_15m / (avg_vol_1m * 15)
+                    
+                    vol_info = f"量能比例: 5K({ratio_5k:.1f}x) | 15K({ratio_15k:.1f}x)"
+                    if ratio_5k > 2.5: vol_alert_msg += "🔥 5K急行爆量！ "
+                    if ratio_15k > 2.0: vol_alert_msg += "🔥 15K波段爆量！"
             
             is_alert = False
             if t_price > 0:
@@ -320,7 +324,13 @@ with tab_tw:
                 with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
-                if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg}") # 🚀 顯示爆量警訊
+                
+                # 🚀 顯示爆量與常駐量能狀態
+                if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
+                elif vol_info: st.caption(f"📉 {vol_info}")
+
+                # 🚀 顯示 AI 雙向算價結果
+                if ai_advice: st.success(ai_advice)
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
                 with c_cond:
@@ -331,21 +341,27 @@ with tab_tw:
                         st.session_state.tw_stocks[idx]['alert_triggered'] = False
                         st.rerun()
                 with c_inp:
-                    new_t_price = st.number_input(f"警示價", value=float(t_price), step=0.5, key=f"inp_{code}")
+                    new_t_price = st.number_input(f"警示目標價", value=float(t_price), step=0.5, key=f"inp_{code}")
                     if new_t_price != t_price:
                         st.session_state.tw_stocks[idx]['target_price'] = new_t_price
                         st.session_state.tw_stocks[idx]['alert_triggered'] = False
                         st.rerun()
                 with c_ai:
                     st.write("") 
+                    # 🚀 AI 雙向算價按鈕：要求回傳進場與目標
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給當沖{'作多' if cond=='>=' else '作空'}停利目標價，回傳數字。").text
-                                p_match = extract_price(res)
-                                if p_match > 0:
-                                    st.session_state.tw_stocks[idx]['target_price'] = p_match
+                                dir_str = '作多' if cond=='>=' else '作空'
+                                prompt = f"針對台股 {name}({code}) 現價 {curr_p}，給出當沖{dir_str}建議。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
+                                res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+                                match = re.search(r'\{.*\}', res, re.DOTALL)
+                                if match:
+                                    data = json.loads(match.group(0))
+                                    st.session_state.tw_stocks[idx]['target_price'] = float(data['target'])
+                                    st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 AI建議 -> 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
                                     st.session_state.tw_stocks[idx]['alert_triggered'] = False
+                                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
                             except: pass
 
@@ -354,13 +370,21 @@ with tab_tw:
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
+                # 🚀 顯示連動股即時報價、漲跌與幅度
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
                     for i, c in enumerate(corr_codes):
                         c_name = all_stocks.get(c, c)
-                        icon = "👑 龍頭" if i == 0 else "🔗 連動"
-                        corr_display.append(f"{icon}: {c_name}({c})")
+                        icon = "👑" if i == 0 else "🔗"
+                        cp, pp = get_live_price(c, is_us=False)
+                        if cp and pp and pp > 0:
+                            diff = cp - pp
+                            pct = (diff / pp) * 100
+                            sign = "+" if diff > 0 else ""
+                            corr_display.append(f"{icon} {c_name} {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
+                        else:
+                            corr_display.append(f"{icon} {c_name}({c})")
                     st.caption(" | ".join(corr_display))
 
 # ====================
@@ -372,12 +396,13 @@ with tab_us:
         code = stock['code']
         t_price = stock.get('target_price', 0.0)
         cond = stock.get('condition', '>=')
+        ai_advice = stock.get('ai_advice', '')
+        
+        # 🚀 美股也破除快取，使用 get_live_price 抓現價
+        curr_p, prev_p = get_live_price(code, is_us=True)
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
-        if not df_daily.empty:
-            curr_p = df_daily['Close'].iloc[-1]
-            prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
-            
+        if curr_p and prev_p and not df_daily.empty:
             is_alert = False
             if t_price > 0:
                 if cond == ">=" and curr_p >= t_price:
@@ -402,6 +427,7 @@ with tab_us:
                 with c_del: st.button("❌ 移除", key=f"del_us_{code}", on_click=cb_remove_us, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** {code} 已觸發：現價 ${curr_p} {cond} 目標 ${t_price}")
+                if ai_advice: st.success(ai_advice)
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
                 with c_cond:
@@ -422,11 +448,16 @@ with tab_us:
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_us_{code}"):
                         with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，給波段{'作多' if cond=='>=' else '作空'}目標價，回傳數字。").text
-                                p_match = extract_price(res)
-                                if p_match > 0:
-                                    st.session_state.us_stocks[idx]['target_price'] = p_match
+                                dir_str = '作多' if cond=='>=' else '作空'
+                                prompt = f"針對美股 {code} 現價 {curr_p}，給出波段{dir_str}建議。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
+                                res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+                                match = re.search(r'\{.*\}', res, re.DOTALL)
+                                if match:
+                                    data = json.loads(match.group(0))
+                                    st.session_state.us_stocks[idx]['target_price'] = float(data['target'])
+                                    st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 AI建議 -> 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
                                     st.session_state.us_stocks[idx]['alert_triggered'] = False
+                                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
                             except: pass
 
@@ -435,12 +466,20 @@ with tab_us:
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
                 
+                # 🚀 美股連動股報價顯示
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
                     for i, c in enumerate(corr_codes):
-                        icon = "👑 龍頭" if i == 0 else "🔗 連動"
-                        corr_display.append(f"{icon}: {c}")
+                        icon = "👑" if i == 0 else "🔗"
+                        cp, pp = get_live_price(c, is_us=True)
+                        if cp and pp and pp > 0:
+                            diff = cp - pp
+                            pct = (diff / pp) * 100
+                            sign = "+" if diff > 0 else ""
+                            corr_display.append(f"{icon} {c} {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
+                        else:
+                            corr_display.append(f"{icon} {c}")
                     st.caption(" | ".join(corr_display))
 
 # ====================
