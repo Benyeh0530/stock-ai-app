@@ -9,6 +9,7 @@ import json
 import re
 import time
 import os
+import copy
 import numpy as np
 
 # --- 基礎設定 ---
@@ -163,60 +164,76 @@ def get_quick_quote(code, is_us=False):
         except: continue
     return None, None, name
 
-# --- 🚀 報告分流：當沖專屬報告 ---
-def get_ai_daytrade_report():
-    if not API_KEY: return {"error": "⚠️ 請設定 API Key"}
-    now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
-    prompt = f"""時間 {now}。你是台股當沖高手。請提供實戰名單。要求：1. 限150元以下。2. 各類別5檔不重複。3. 找近期高震幅活躍股。
-    JSON: {{ "台股當沖作多": [], "台股當沖作空": [] }} 
-    (格式：{{"code": "代碼", "name": "名稱", "strategy": "判斷基準(如爆量、均線)", "reason": "理由"}})"""
-    try:
-        response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        data = json.loads(match.group(0) if match else response)
-        
-        # 🚀 Python 即時報價校正引擎 (消滅 AI 幻覺價格)
-        for cat, stocks in data.items():
-            for s in stocks:
-                c_p, _, _ = get_quick_quote(s['code'], False)
-                if c_p:
-                    s['curr_p'] = c_p
-                    # 當沖合規價格推算：作多抓現價 +1.5%，作空抓現價 -1.5%
-                    s['price'] = round(c_p * 1.015, 2) if "多" in cat else round(c_p * 0.985, 2)
-                else:
-                    s['curr_p'] = "未知"
-                    s['price'] = 0.0
-        return data
-    except Exception as e: return {"error": f"API 錯誤: {e}"}
+# --- 🚀 報告額度防護系統 (分離 AI 與即時報價) ---
 
-# --- 🚀 報告分流：波段熱點專屬報告 ---
-def get_ai_swing_report():
+@st.cache_data(ttl=3600) # 當沖名單：快取 1 小時，避免重複扣額度
+def fetch_raw_daytrade_ai():
     if not API_KEY: return {"error": "⚠️ 請設定 API Key"}
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
-    prompt = f"""時間 {now}。你是跨國波段操盤手。請提供實戰名單。要求：台股限150元以下。各類別5檔不重複。
-    JSON: {{ "美股短波分析": [美股代碼], "資金熱點TOP5": [台股代碼] }} 
+    prompt = f"""時間 {now}。你是台股當沖高手。
+    請依照 JSON 格式回傳。要求：1. 台股150元以下。2. 各類別精準5檔且不重複。3. 找高震幅活躍股。
+    JSON: {{ "台股當沖作多": [ 5筆資料 ], "台股當沖作空": [ 5筆資料 ] }} 
     (格式：{{"code": "代碼", "name": "名稱", "strategy": "判斷基準", "reason": "理由"}})"""
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
-        data = json.loads(match.group(0) if match else response)
-        
-        # 🚀 Python 即時報價校正引擎
-        for cat, stocks in data.items():
-            is_us = "美股" in cat
-            for s in stocks:
-                c_p, _, _ = get_quick_quote(s['code'], is_us)
-                if c_p:
-                    s['curr_p'] = c_p
-                    # 波段合規價格推算：抓現價 +5% 作為停利參考
-                    s['price'] = round(c_p * 1.05, 2)
-                else:
-                    s['curr_p'] = "未知"
-                    s['price'] = 0.0
-        return data
-    except Exception as e: return {"error": f"API 錯誤: {e}"}
+        return json.loads(match.group(0) if match else response)
+    except Exception as e:
+        if "429" in str(e): return {"error": "🚨 Google API 額度滿了。請稍後再試。"}
+        return {"error": f"API 錯誤: {e}"}
 
-@st.cache_data(ttl=86400)
+def get_ai_daytrade_report():
+    raw_data = fetch_raw_daytrade_ai()
+    if "error" in raw_data: return raw_data
+    data = copy.deepcopy(raw_data) # 深拷貝，避免修改到快取本體
+    
+    # Python 即時抓價，保證報價永遠最新，目標價不亂掰
+    for cat, stocks in data.items():
+        for s in stocks:
+            c_p, _, _ = get_quick_quote(s['code'], False)
+            if c_p:
+                s['curr_p'] = c_p
+                s['price'] = round(c_p * 1.015, 2) if "多" in cat else round(c_p * 0.985, 2)
+            else:
+                s['curr_p'] = "未知"
+                s['price'] = 0.0
+    return data
+
+@st.cache_data(ttl=43200) # 波段熱點名單：快取 12 小時 (極度省額度)
+def fetch_raw_swing_ai():
+    if not API_KEY: return {"error": "⚠️ 請設定 API Key"}
+    now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
+    prompt = f"""時間 {now}。你是跨國波段操盤手。
+    請依照 JSON 格式回傳。要求：台股限150元以下。各類別精準5檔且不重複。
+    JSON: {{ "美股短波分析": [ 5筆資料 ], "資金熱點TOP5": [ 5筆資料 ] }} 
+    (格式：{{"code": "代碼", "name": "名稱", "strategy": "判斷基準", "reason": "理由"}})"""
+    try:
+        response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        match = re.search(r'\{.*\}', response, re.DOTALL)
+        return json.loads(match.group(0) if match else response)
+    except Exception as e:
+        if "429" in str(e): return {"error": "🚨 Google API 額度滿了。請稍後再試。"}
+        return {"error": f"API 錯誤: {e}"}
+
+def get_ai_swing_report():
+    raw_data = fetch_raw_swing_ai()
+    if "error" in raw_data: return raw_data
+    data = copy.deepcopy(raw_data)
+    
+    # Python 即時抓價
+    for cat, stocks in data.items():
+        is_us = "美股" in cat
+        for s in stocks:
+            c_p, _, _ = get_quick_quote(s['code'], is_us)
+            if c_p:
+                s['curr_p'] = c_p
+                s['price'] = round(c_p * 1.05, 2)
+            else:
+                s['curr_p'] = "未知"
+                s['price'] = 0.0
+    return data
+
+@st.cache_data(ttl=86400) # 連動股：一天抓一次
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
@@ -258,7 +275,6 @@ with st.sidebar:
     if TG_BOT_TOKEN and TG_CHAT_ID: st.success("📱 Telegram 推播已啟用")
     else: st.warning("📱 尚未設定 Telegram (設定 st.secrets 即可啟用)")
 
-    # 🚀 報告分流按鈕
     st.divider()
     st.header("🤖 AI 獨家選股報告")
     if st.button("🚀 生成【當沖短線】報告", use_container_width=True, type="primary"):
@@ -272,7 +288,6 @@ with st.sidebar:
     st.header("🎯 自訂監控加入")
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
-    # 🚀 使用 Callback 防彈寫法
     if selected_tw != "請點此搜尋...":
         code = selected_tw.split(" ")[0]
         name = " ".join(selected_tw.split(" ")[1:])
@@ -311,7 +326,6 @@ elif isinstance(report_state, dict):
                             st.write(f"**策略理由**：{stock.get('strategy', '')}")
                             st.write(f"**詳細分析**：{stock.get('reason', '')}")
                             
-                            # 🚀 使用 Callback 防彈帶入價格
                             cond = "<=" if "空" in category else ">="
                             is_us_cat = "美股" in category
                             btn_text = f"➕ 帶入目標價 {t_p} 且監控 {'跌破' if cond=='<=' else '漲破'}"
@@ -354,7 +368,6 @@ with tab_tw:
                         send_telegram_alert(f"📉 🚨【台股作空/停損】\n{name}({code}) 已『跌穿』目標價！\n現價：{curr_p}\n警示價：{t_price}")
                         st.session_state.tw_stocks[idx]['alert_triggered'] = True
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                # 脫離警戒區重置
                 if cond == ">=" and curr_p < t_price * 0.995: st.session_state.tw_stocks[idx]['alert_triggered'] = False
                 if cond == "<=" and curr_p > t_price * 1.005: st.session_state.tw_stocks[idx]['alert_triggered'] = False
 
@@ -362,7 +375,6 @@ with tab_tw:
                 c_title, c_del = st.columns([5, 1])
                 with c_title: st.markdown(f"#### {name}({code})")
                 with c_del:
-                    # 🚀 Callback 單獨刪除
                     st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert:
@@ -387,7 +399,7 @@ with tab_tw:
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給當沖{'作多' if cond=='>=' else '作空'}停利目標價，只回傳數字。").text
+                                res = ai_model.generate_content(f"台股 {name} 現價 {curr_p}，請給當沖{'作多' if cond=='>=' else '作空'}停利目標價，回傳數字。").text
                                 p_match = extract_price(res)
                                 if p_match > 0:
                                     st.session_state.tw_stocks[idx]['target_price'] = p_match
@@ -461,7 +473,7 @@ with tab_us:
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_us_{code}"):
                         with st.spinner("..."):
                             try:
-                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，請給波段{'作多' if cond=='>=' else '作空'}目標價，只回傳數字。").text
+                                res = ai_model.generate_content(f"美股 {code} 現價 {curr_p}，給波段{'作多' if cond=='>=' else '作空'}目標價，回傳數字。").text
                                 p_match = extract_price(res)
                                 if p_match > 0:
                                     st.session_state.us_stocks[idx]['target_price'] = p_match
