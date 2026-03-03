@@ -143,27 +143,31 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), None, ""
 
-# 🚀 移除快取，並加入 _t 破壞快取機制確保報價絕對即時更新
+# 🚀 真・無快取：保證取得最新一分鐘內的爆量資料
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # 強制加入 timestamp 避免 Yahoo 伺服器回傳舊資料
-        res_1m = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d&_t={int(time.time())}", headers=headers, timeout=3).json()
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=1d&_t={int(time.time())}"
+        res_1m = requests.get(url, headers=headers, timeout=3).json()
         idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
         q = res_1m['chart']['result'][0]['indicators']['quote'][0]
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 移除快取確保連動股與最新價格即時跳動
+# 🚀 真・無快取：升級使用 Yahoo Quote API (毫秒級真實跳動報價)
 def get_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suffix in suffixes:
         try:
-            res = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1d&range=5d&_t={int(time.time())}", headers=headers, timeout=2).json()
-            closes = [c for c in res['chart']['result'][0]['indicators']['quote'][0]['close'] if c is not None]
-            if len(closes) >= 2: return closes[-1], closes[-2]
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suffix}&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            result = res.get('quoteResponse', {}).get('result', [])
+            if result:
+                curr_p = result[0].get('regularMarketPrice')
+                prev_p = result[0].get('regularMarketPreviousClose', curr_p)
+                if curr_p: return curr_p, prev_p
         except: continue
     return None, None
 
@@ -191,6 +195,10 @@ def get_correlated_stocks(code, name, is_us=False):
         return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
     except: return []
 
+def extract_price(price_str):
+    match = re.search(r'\d+(\.\d+)?', str(price_str))
+    return float(match.group()) if match else 0.0
+
 # --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
@@ -205,7 +213,7 @@ with col_t2:
     if '那斯達克' in market_temp:
         st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    if API_KEY: st.success(f"🟢 API 火力全開 | 最後更新: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {datetime.datetime.now().strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
 st.divider()
@@ -275,17 +283,20 @@ with tab_tw:
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
         cond = stock.get('condition', '>=') 
-        ai_advice = stock.get('ai_advice', '') # 🚀 讀取專屬 AI 建議
+        ai_advice = stock.get('ai_advice', '')
         
+        # 🚀 雙軌並行：live_p 負責毫秒即時報價，df_1m 負責算 VWAP 與量能
+        live_cp, live_pp = get_live_price(code, is_us=False)
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
         if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
-            curr_p = df_1m['Close'].iloc[-1]
-            prev_p = df_daily['Close'].iloc[-2] if len(df_daily) > 1 else curr_p
+            # 優先使用最即時的 Quote API 報價
+            curr_p = live_cp if live_cp else df_1m['Close'].iloc[-1]
+            prev_p = live_pp if live_pp else df_daily['Close'].iloc[-2]
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 5K / 15K 爆量動能偵測引擎 (確保隨時顯示運作狀態)
+            # 🚀 5K / 15K 爆量動能偵測引擎
             vol_alert_msg = ""
             vol_info = ""
             if len(df_1m) >= 15:
@@ -324,12 +335,9 @@ with tab_tw:
                 with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
-                
-                # 🚀 顯示爆量與常駐量能狀態
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
                 elif vol_info: st.caption(f"📉 {vol_info}")
 
-                # 🚀 顯示 AI 雙向算價結果
                 if ai_advice: st.success(ai_advice)
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
@@ -348,7 +356,6 @@ with tab_tw:
                         st.rerun()
                 with c_ai:
                     st.write("") 
-                    # 🚀 AI 雙向算價按鈕：要求回傳進場與目標
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
@@ -370,14 +377,14 @@ with tab_tw:
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
-                # 🚀 顯示連動股即時報價、漲跌與幅度
+                # 🚀 連動股：即時抓取最新現價、計算漲跌與漲跌幅
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
                     for i, c in enumerate(corr_codes):
                         c_name = all_stocks.get(c, c)
                         icon = "👑" if i == 0 else "🔗"
-                        cp, pp = get_live_price(c, is_us=False)
+                        cp, pp = get_live_price(c, is_us=False) # 真即時報價
                         if cp and pp and pp > 0:
                             diff = cp - pp
                             pct = (diff / pp) * 100
@@ -398,7 +405,6 @@ with tab_us:
         cond = stock.get('condition', '>=')
         ai_advice = stock.get('ai_advice', '')
         
-        # 🚀 美股也破除快取，使用 get_live_price 抓現價
         curr_p, prev_p = get_live_price(code, is_us=True)
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
@@ -466,7 +472,7 @@ with tab_us:
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
                 
-                # 🚀 美股連動股報價顯示
+                # 🚀 美股連動股即時報價
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
