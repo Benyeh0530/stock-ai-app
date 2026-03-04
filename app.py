@@ -15,51 +15,50 @@ import numpy as np
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 🎨 首席設計師的 CSS 視覺美化 ---
+# --- 🎨 首席設計師的 CSS 視覺美化 (修復側邊欄文字隱形問題) ---
 st.markdown("""
 <style>
     /* 整體背景與間距微調 */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     
     /* 漸層科技感主標題 */
     h1 {
         background: -webkit-linear-gradient(45deg, #00f2fe, #4facfe);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        font-weight: 900;
-        letter-spacing: 1px;
-        text-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+        font-weight: 900; letter-spacing: 1px;
     }
     
+    /* 側邊欄文字絕對高光修復 */
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] .stMarkdown h1,
+    [data-testid="stSidebar"] .stMarkdown h2,
+    [data-testid="stSidebar"] .stMarkdown h3 {
+        color: #f1f5f9 !important;
+        text-shadow: 0px 1px 3px rgba(0,0,0,0.8);
+    }
+    .stCheckbox label p {
+        color: #f1f5f9 !important;
+        font-weight: 600;
+        text-shadow: 0px 1px 3px rgba(0,0,0,0.8);
+    }
+
     /* 數據面板字體強化 */
     div[data-testid="stMetricValue"] {
-        font-size: 1.9rem;
-        font-weight: 700;
-        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        font-size: 1.9rem; font-weight: 700;
     }
     label[data-testid="stMetricLabel"] p {
-        font-weight: 600;
-        color: #8b9bb4 !important;
-        font-size: 0.95rem;
+        font-weight: 600; color: #8b9bb4 !important; font-size: 0.95rem;
     }
 
     /* 卡片與邊框圓角立體化 */
     div[data-testid="stVerticalBlock"] div[style*="border"] {
         border-radius: 12px !important;
         border: 1px solid #2d3748 !important;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
         background-color: rgba(17, 24, 39, 0.4) !important;
-        transition: transform 0.2s ease-in-out;
-    }
-    div[data-testid="stVerticalBlock"] div[style*="border"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
     }
 
-    /* 側邊欄美化 */
+    /* 側邊欄背景 */
     section[data-testid="stSidebar"] {
         background-color: #0f172a;
         border-right: 1px solid #1e293b;
@@ -68,32 +67,7 @@ st.markdown("""
     /* 按鈕高質感漸層 */
     button[kind="primary"] {
         background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-        color: white;
-        font-weight: 600;
-        border: none;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
-    }
-    button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-        box-shadow: 0 6px 8px rgba(37, 99, 235, 0.3);
-    }
-
-    /* 摺疊面板美化 */
-    div[data-testid="stExpander"] {
-        border-radius: 8px !important;
-        border: 1px solid #334155 !important;
-        background-color: rgba(30, 41, 59, 0.5) !important;
-    }
-    div[data-testid="stExpander"] p {
-        font-weight: 600;
-        font-size: 1.05rem;
-    }
-
-    /* 分籤頁美化 */
-    div[data-testid="stTabs"] button {
-        font-size: 1.1rem;
-        font-weight: 600;
+        color: white; font-weight: 600; border: none; border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -174,7 +148,6 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與舊資料向下相容升級
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -372,6 +345,10 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
+def extract_price(price_str):
+    match = re.search(r'\d+(\.\d+)?', str(price_str))
+    return float(match.group()) if match else 0.0
+
 # --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
@@ -420,15 +397,11 @@ if twii_cp and twii_mas:
         dist_pct = dist_pts / ma_val
         
         if abs(dist_pct) <= threshold:
-            if dist_pts > 0:
-                ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
-            else:
-                ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n🔥 **突破叩關**：即將突破，僅差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
+            if dist_pts > 0: ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
+            else: ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n🔥 **突破叩關**：即將突破，僅差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         else:
-            if dist_pts > 0:
-                ma_cols[idx].success(f"**{ma_name}** `{ma_val:.0f}`\n\n🛡️ **支撐防護**：距跌破還剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
-            else:
-                ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
+            if dist_pts > 0: ma_cols[idx].success(f"**{ma_name}** `{ma_val:.0f}`\n\n🛡️ **支撐防護**：距跌破還剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
+            else: ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         
         state_key = f"twii_{ma_name}"
         if abs(dist_pct) <= threshold:
@@ -519,6 +492,7 @@ with tab_tw:
             mas['15K5MA'] = df_15k['Close'].tail(5).mean()
             mas['15K20MA'] = df_15k['Close'].tail(20).mean()
         
+        cdp_nh = cdp_nl = 0.0
         if not df_1m.empty and not df_daily.empty:
             live_cp, live_pp = live_price_dict.get(code, (None, None))
             if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=False)
@@ -527,14 +501,24 @@ with tab_tw:
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
+            # 🚀 精算 CDP 與 Pivot 指標
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
                 y_high = df_daily['High'].iloc[-2]
                 y_low = df_daily['Low'].iloc[-2]
                 y_close = df_daily['Close'].iloc[-2]
+                
                 pivot = (y_high + y_low + y_close) / 3
                 r1 = (2 * pivot) - y_low
                 s1 = (2 * pivot) - y_high
+                
+                # 🚀 CDP 逆勢操作系統核心算法
+                cdp = (y_high + y_low + 2 * y_close) / 4
+                cdp_nh = (2 * cdp) - y_low
+                cdp_nl = (2 * cdp) - y_high
+                mas['CDP(中價)'] = cdp
+                mas['CDP_NH(壓力)'] = cdp_nh
+                mas['CDP_NL(支撐)'] = cdp_nl
             
             vol_alert_msg = ""; vol_info = ""
             is_vol_surge = False 
@@ -629,10 +613,24 @@ with tab_tw:
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
 
+                # 🚀 迷你當沖走勢圖 + CDP 壓力/支撐線
+                if not df_1m.empty:
+                    chart_df = df_1m[['Close']].copy()
+                    chart_df.index = chart_df.index.tz_convert('Asia/Taipei')
+                    chart_df.rename(columns={'Close': '現價'}, inplace=True)
+                    if cdp_nh > 0 and cdp_nl > 0:
+                        chart_df['CDP_NH(壓力)'] = cdp_nh
+                        chart_df['CDP_NL(支撐)'] = cdp_nl
+                        st.line_chart(chart_df, color=['#3b82f6', '#ef4444', '#10b981'], height=150)
+                    else:
+                        st.line_chart(chart_df, color=['#3b82f6'], height=150)
+
                 for a_idx, al in enumerate(alerts):
-                    c_type, c_cond, c_inp, c_del_al = st.columns([2, 2, 3, 1])
-                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA"]
+                    c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
+                    # 🚀 納入 CDP 做為監控目標選項
+                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                     current_type = al.get('type', "固定價格")
+                    if current_type not in opts: current_type = "固定價格" # 防呆
                     
                     with c_type:
                         new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_tw_{code}_{a_idx}", label_visibility="collapsed")
@@ -666,7 +664,7 @@ with tab_tw:
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                 
-                c_btn1, c_btn2, _ = st.columns([1, 1, 2])
+                c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"):
                         st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
@@ -744,6 +742,7 @@ with tab_us:
             mas['15K5MA'] = df_15k['Close'].tail(5).mean()
             mas['15K20MA'] = df_15k['Close'].tail(20).mean()
 
+        cdp_nh = cdp_nl = 0.0
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=True)
         
@@ -755,9 +754,18 @@ with tab_us:
                 y_high = df_daily['High'].iloc[-2]
                 y_low = df_daily['Low'].iloc[-2]
                 y_close = df_daily['Close'].iloc[-2]
+                
                 pivot = (y_high + y_low + y_close) / 3
                 r1 = (2 * pivot) - y_low
                 s1 = (2 * pivot) - y_high
+                
+                # 🚀 美股 CDP 計算
+                cdp = (y_high + y_low + 2 * y_close) / 4
+                cdp_nh = (2 * cdp) - y_low
+                cdp_nl = (2 * cdp) - y_high
+                mas['CDP(中價)'] = cdp
+                mas['CDP_NH(壓力)'] = cdp_nh
+                mas['CDP_NL(支撐)'] = cdp_nl
             
             is_alert = False
             triggered_msgs = []
@@ -820,10 +828,23 @@ with tab_us:
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
 
+                # 🚀 美股迷你走勢圖
+                if not df_1m_us.empty:
+                    chart_df = df_1m_us[['Close']].copy()
+                    chart_df.index = chart_df.index.tz_convert('America/New_York') # 美東時間
+                    chart_df.rename(columns={'Close': '現價'}, inplace=True)
+                    if cdp_nh > 0 and cdp_nl > 0:
+                        chart_df['CDP_NH(壓力)'] = cdp_nh
+                        chart_df['CDP_NL(支撐)'] = cdp_nl
+                        st.line_chart(chart_df, color=['#3b82f6', '#ef4444', '#10b981'], height=150)
+                    else:
+                        st.line_chart(chart_df, color=['#3b82f6'], height=150)
+
                 for a_idx, al in enumerate(alerts):
-                    c_type, c_cond, c_inp, c_del_al = st.columns([2, 2, 3, 1])
-                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA"]
+                    c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
+                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                     current_type = al.get('type', "固定價格")
+                    if current_type not in opts: current_type = "固定價格"
                     
                     with c_type:
                         new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_us_{code}_{a_idx}", label_visibility="collapsed")
@@ -857,7 +878,7 @@ with tab_us:
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
 
-                c_btn1, c_btn2, _ = st.columns([1, 1, 2])
+                c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"):
                         st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
