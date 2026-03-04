@@ -116,7 +116,6 @@ if 'initialized' not in st.session_state:
     st.session_state.ai_report_swing = None
     st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
     
-    # 🚀 新增：大盤均線雷達推播的冷卻標記
     if 'market_alert_flags' not in st.session_state:
         st.session_state.market_alert_flags = {}
         
@@ -149,7 +148,6 @@ def get_market_temp():
         except: pass
     return results
 
-# 🚀 新增引擎：專門計算大盤(加權指數)歷史均線，每 5 分鐘重算一次以節省資源
 @st.cache_data(ttl=300)
 def get_index_mas(code='^TWII'):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -213,7 +211,6 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 主引擎 Spark API
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -242,7 +239,6 @@ def get_bulk_spark_prices(tw_codes, us_codes):
         except: pass
     return prices
 
-# 🚀 備用引擎
 @st.cache_data(ttl=3, show_spinner=False)
 def get_single_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -288,6 +284,10 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
+def extract_price(price_str):
+    match = re.search(r'\d+(\.\d+)?', str(price_str))
+    return float(match.group()) if match else 0.0
+
 # --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
@@ -302,11 +302,9 @@ for s in st.session_state.us_stocks:
     all_us_to_fetch.add(s['code'])
     all_us_to_fetch.update(get_correlated_stocks(s['code'], s['code'], True))
 
-# 🚀 將大盤代碼加入美股名單(因為免後綴)一起無敵批次抓取即時價格
 all_us_to_fetch.add('^TWII')
 live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
 
-# 頂端大盤溫度
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp: st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
@@ -319,7 +317,7 @@ with col_t3:
 st.divider()
 
 # ==========================================
-# 🚀 全新功能：台股大盤關鍵均線雷達與自動推播
+# 🚀 升級優化：人性化台股大盤關鍵均線雷達
 # ==========================================
 twii_mas = get_index_mas('^TWII')
 twii_cp = live_price_dict.get('^TWII', (None, None))[0]
@@ -327,17 +325,26 @@ if twii_cp is None and '台股加權' in market_temp:
     twii_cp = market_temp['台股加權'][0]
 
 if twii_cp and twii_mas:
-    st.markdown("##### 📊 台股大盤關鍵均線雷達")
+    st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
     ma_cols = st.columns(4)
-    threshold = 0.003 # 設定 0.3% 為「即將觸碰」的警戒線
+    threshold = 0.003 # 設定 0.3% 叩關警戒線
     alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
         dist_pts = twii_cp - ma_val
         dist_pct = dist_pts / ma_val
         
-        # 渲染畫面 UI
-        ma_cols[idx].metric(f"{ma_name} ({ma_val:.0f})", f"距 {dist_pts:+.0f} 點", f"{dist_pct*100:+.2f}%", delta_color="normal" if dist_pct > 0 else "inverse")
+        # 💡 UI 優化：依據相對位置變換警告顏色與人性化文案
+        if abs(dist_pct) <= threshold:
+            if dist_pts > 0:
+                ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
+            else:
+                ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n🔥 **突破叩關**：即將突破，僅差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
+        else:
+            if dist_pts > 0:
+                ma_cols[idx].success(f"**{ma_name}** `{ma_val:.0f}`\n\n🛡️ **支撐防護**：距跌破還剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
+            else:
+                ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         
         # 判斷推播邏輯
         state_key = f"twii_{ma_name}"
@@ -350,7 +357,6 @@ if twii_cp and twii_mas:
                 alert_msgs.append(msg)
                 st.session_state.market_alert_flags[state_key] = True
         else:
-            # 遠離均線後解除標記，準備下次攻擊再叫
             st.session_state.market_alert_flags[state_key] = False
             
     if alert_msgs:
