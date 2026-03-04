@@ -536,6 +536,7 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_inp:
                         new_t_price = st.number_input("警示價", value=float(al['price']), step=0.5, key=f"inp_{code}_{a_idx}", label_visibility="collapsed")
@@ -543,6 +544,7 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_{code}_{a_idx}"):
@@ -554,6 +556,7 @@ with tab_tw:
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"):
                         st.session_state.tw_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 with c_btn2:
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_{code}"):
@@ -691,6 +694,7 @@ with tab_us:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_inp:
                         new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
@@ -698,6 +702,7 @@ with tab_us:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"):
@@ -709,6 +714,7 @@ with tab_us:
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"):
                         st.session_state.us_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 with c_btn2:
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
