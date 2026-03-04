@@ -48,12 +48,19 @@ def save_watchlist(tw, us):
 # --- 🚀 防彈按鈕 Callbacks ---
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     if code and code not in [s['code'] for s in st.session_state.tw_stocks]:
-        st.session_state.tw_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False, "ai_advice": ""})
+        st.session_state.tw_stocks.append({
+            "code": code, "name": name, "target_price": float(target_price), 
+            "condition": condition, "alert_triggered": False, "ai_advice": "", 
+            "vol_alert_triggered": False # 🚀 新增爆量推播專屬記憶點
+        })
         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_add_us(code, name, target_price=0.0, condition=">="):
     if code and code not in [s['code'] for s in st.session_state.us_stocks]:
-        st.session_state.us_stocks.append({"code": code, "name": name, "target_price": float(target_price), "condition": condition, "alert_triggered": False, "ai_advice": ""})
+        st.session_state.us_stocks.append({
+            "code": code, "name": name, "target_price": float(target_price), 
+            "condition": condition, "alert_triggered": False, "ai_advice": ""
+        })
         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_remove_tw(idx):
@@ -306,6 +313,7 @@ for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
                             if "美股" in cat: st.button(btn_txt, key=f"btn_u_{s['code']}", on_click=cb_add_us, args=(s['code'], s['name'], target, cond))
                             else: st.button(btn_txt, key=f"btn_t_{s['code']}", on_click=cb_add_tw, args=(s['code'], s['name'], target, cond))
 
+# 監控分頁
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
 
 # ====================
@@ -333,6 +341,7 @@ with tab_tw:
             
             # 🔥 保證完整保留：5K / 15K 爆量動能雷達
             vol_alert_msg = ""; vol_info = ""
+            is_vol_surge = False # 🚀 爆量獨立觸發標記
             if len(df_1m) >= 15:
                 df_1m['Volume'] = df_1m['Volume'].fillna(0)
                 avg_vol_1m = df_1m['Volume'].mean()
@@ -342,10 +351,25 @@ with tab_tw:
                     ratio_5k = vol_5m / (avg_vol_1m * 5)
                     ratio_15k = vol_15m / (avg_vol_1m * 15)
                     vol_info = f"量能比例: 5K({ratio_5k:.1f}x) | 15K({ratio_15k:.1f}x)"
-                    if ratio_5k > 2.5: vol_alert_msg += "🔥 5K急行爆量！ "
-                    if ratio_15k > 2.0: vol_alert_msg += "🔥 15K波段爆量！"
+                    if ratio_5k > 2.5: 
+                        vol_alert_msg += "🔥 5K急行爆量！ "
+                        is_vol_surge = True
+                    if ratio_15k > 2.0: 
+                        vol_alert_msg += "🔥 15K波段爆量！"
+                        is_vol_surge = True
+
+            # 🚀 新增：獨立的爆量 Telegram 推播邏輯 (不依賴目標價)
+            if is_vol_surge:
+                if not stock.get('vol_alert_triggered', False):
+                    send_telegram_alert(f"📊 🚨【台股動能異常】\n{name}({code}) 觸發主力爆量！\n現價：{curr_p}\n狀態：{vol_alert_msg.strip()}\n詳細：{vol_info}")
+                    st.session_state.tw_stocks[idx]['vol_alert_triggered'] = True
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+            else:
+                if stock.get('vol_alert_triggered', False):
+                    st.session_state.tw_stocks[idx]['vol_alert_triggered'] = False
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
             
-            # 🚀 組合給 Telegram 用的動能字串
+            # 🚀 組合給 Telegram 用的動能字串 (依附在價格警示中，保留雙重確認)
             tg_vol_str = f"\n📊 動能: {vol_alert_msg.strip()} {vol_info}".strip() if vol_info else ""
 
             is_alert = False
@@ -495,7 +519,6 @@ with tab_us:
                         st.rerun()
                 with c_ai:
                     st.write("") 
-                    # 🤖 保證完整保留：AI 雙向進出場算價 + 🚀 數學防呆鎖
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_us_{code}"):
                         with st.spinner("..."):
                             try:
