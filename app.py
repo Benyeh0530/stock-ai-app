@@ -9,7 +9,6 @@ import json
 import re
 import time
 import os
-import copy
 import numpy as np
 
 # --- 基礎設定 ---
@@ -143,7 +142,7 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), None, ""
 
-# 分鐘線計算爆量用
+# 獲取分鐘線計算爆量用
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -155,25 +154,20 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 終極修復：改用 v8 spark API，完全免疫 Yahoo 封鎖與 Cookie 限制！
-def get_bulk_live_prices(tw_codes, us_codes):
+# 🚀 報價主引擎：真正使用 v8 Spark API (免疫封鎖)
+def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
-    for c in tw_codes:
-        symbols.extend([f"{c}.TW", f"{c}.TWO"])
-    for c in us_codes:
-        symbols.append(c)
-    
+    for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
+    for c in us_codes: symbols.append(c)
     if not symbols: return {}
     
     prices = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     chunk_size = 15
     for i in range(0, len(symbols), chunk_size):
         chunk = symbols[i:i + chunk_size]
         sym_str = ",".join(chunk)
         try:
-            # Spark API 專門用來產生首頁小圖，穩定且不會封鎖
             url = f"https://query2.finance.yahoo.com/v8/finance/spark?symbols={sym_str}&range=1d&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=5).json()
             results = res.get('spark', {}).get('result', [])
@@ -184,12 +178,26 @@ def get_bulk_live_prices(tw_codes, us_codes):
                 if resp_list:
                     meta = resp_list[0].get('meta', {})
                     curr_p = meta.get('regularMarketPrice')
-                    # 取 chartPreviousClose 或 previousClose 皆可
                     prev_p = meta.get('chartPreviousClose', meta.get('previousClose', curr_p))
-                    if curr_p is not None:
-                        prices[base_sym] = (curr_p, prev_p)
+                    if curr_p is not None: prices[base_sym] = (curr_p, prev_p)
         except: pass
     return prices
+
+# 🚀 報價備用引擎：萬一 Spark 沒抓到，3 秒內自動補抓確保資料不掉
+@st.cache_data(ttl=3, show_spinner=False)
+def get_single_live_price(code, is_us=False):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    suffixes = [""] if is_us else [".TW", ".TWO"]
+    for suffix in suffixes:
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=2d&_t={int(time.time())//3}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            meta = res['chart']['result'][0]['meta']
+            cp = meta.get('regularMarketPrice')
+            pp = meta.get('chartPreviousClose', cp)
+            if cp is not None: return cp, pp
+        except: pass
+    return None, None
 
 @st.cache_data(ttl=43200)
 def fetch_ai_list(report_type):
@@ -199,24 +207,22 @@ def fetch_ai_list(report_type):
         prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空標的。限150元以下。找尋高波動活躍股。JSON: {{ '台股當沖作多': [], '台股當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '理由'}})"
     else:
         prompt = f"時間 {now}。你是跨國波段操盤手。提供5檔美股短波、5檔台股資金熱點。台股限150元以下。JSON: {{ '美股短波分析': [], '資金熱點TOP5': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '理由'}})"
-    
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         match = re.search(r'\{.*\}', response, re.DOTALL)
         return json.loads(match.group(0))
     except: return None
 
+# 🚀 AI 防呆網：強制用 Regex 挖出乾淨的 4 碼數字代碼
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
     try:
-        prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，用逗號分隔，不要任何中文或說明文字。"
+        prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，不要任何中文或說明文字。"
         res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        
         if is_us: codes = re.findall(r'[A-Z]+', res.upper())
         else: codes = re.findall(r'\d{4,}', res)
-            
         seen = set(); uniq = []
         for c in codes:
             if c not in seen and c != code:
@@ -233,38 +239,28 @@ st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
 
-# 🚀 統一把「所有需要監控的股票 + 連動股」一次去 Yahoo 抓回來
+# 🚀 渲染前先用主引擎統一抓取所有股票 (本尊 + 連動小弟)
 all_tw_to_fetch = set()
 all_us_to_fetch = set()
-
 for s in st.session_state.tw_stocks:
     all_tw_to_fetch.add(s['code'])
-    corrs = get_correlated_stocks(s['code'], s['name'], False)
-    all_tw_to_fetch.update(corrs)
-    
+    all_tw_to_fetch.update(get_correlated_stocks(s['code'], s['name'], False))
 for s in st.session_state.us_stocks:
     all_us_to_fetch.add(s['code'])
-    corrs = get_correlated_stocks(s['code'], s['code'], True)
-    all_us_to_fetch.update(corrs)
+    all_us_to_fetch.update(get_correlated_stocks(s['code'], s['code'], True))
 
-# 執行批次抓價 (無敵防封鎖引擎)
-live_price_dict = get_bulk_live_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
+live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
 
-# 頂部大盤溫度與更新時間
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
-    if '台股加權' in market_temp:
-        st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
+    if '台股加權' in market_temp: st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
 with col_t2:
-    if '那斯達克' in market_temp:
-        st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
+    if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
     if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {datetime.datetime.now().strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
-
 st.divider()
 
-# 側邊欄控制
 with st.sidebar:
     st.header("🤖 選股報告分流")
     if st.button("🚀 生成【當沖短線】報告", use_container_width=True, type="primary"):
@@ -277,19 +273,16 @@ with st.sidebar:
     stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
     if selected_tw != "請點此搜尋...":
-        code = selected_tw.split(" ")[0]
-        name = " ".join(selected_tw.split(" ")[1:])
+        code = selected_tw.split(" ")[0]; name = " ".join(selected_tw.split(" ")[1:])
         st.button(f"➕ 加入 {name} (台股)", on_click=cb_add_tw, args=(code, name))
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
-    if us_code:
-        st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
+    if us_code: st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
             
     st.divider()
     auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
     st.button("🗑️ 徹底清空所有資料", on_click=cb_clear_all, type="secondary")
 
-# 顯示分流報告
 for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
     if report:
         with st.container(border=True):
@@ -297,30 +290,22 @@ for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
             for i, (cat, stocks) in enumerate(report.items()):
                 with tabs[i]:
                     for s in stocks:
-                        # 報告區抓取單支即時價避免佔用批量空間
-                        c_p_t = get_bulk_live_prices([s['code']] if "台股" in cat or "資金" in cat else [], [s['code']] if "美股" in cat else [])
+                        c_p_t = get_bulk_spark_prices([s['code']] if "台股" in cat or "資金" in cat else [], [s['code']] if "美股" in cat else [])
                         c_p = c_p_t.get(s['code'], (None, None))[0]
+                        if c_p is None: c_p, _ = get_single_live_price(s['code'], "美股" in cat) # 備用引擎抓取
                         
-                        target = 0
-                        cond = ">="
+                        target = 0; cond = ">="
                         if c_p:
-                            if "空" in cat:
-                                target = round(c_p * 0.985, 2)
-                                cond = "<="
-                            elif "多" in cat:
-                                target = round(c_p * 1.015, 2)
-                            else:
-                                target = round(c_p * 1.05, 2)
+                            if "空" in cat: target = round(c_p * 0.985, 2); cond = "<="
+                            elif "多" in cat: target = round(c_p * 1.015, 2)
+                            else: target = round(c_p * 1.05, 2)
                         
                         with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 目標價: {target}"):
                             st.write(f"**策略理由**：{s.get('strategy', '')}")
                             btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
-                            if "美股" in cat:
-                                st.button(btn_txt, key=f"btn_u_{s['code']}", on_click=cb_add_us, args=(s['code'], s['name'], target, cond))
-                            else:
-                                st.button(btn_txt, key=f"btn_t_{s['code']}", on_click=cb_add_tw, args=(s['code'], s['name'], target, cond))
+                            if "美股" in cat: st.button(btn_txt, key=f"btn_u_{s['code']}", on_click=cb_add_us, args=(s['code'], s['name'], target, cond))
+                            else: st.button(btn_txt, key=f"btn_t_{s['code']}", on_click=cb_add_tw, args=(s['code'], s['name'], target, cond))
 
-# 監控分頁
 tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
 
 # ====================
@@ -332,21 +317,22 @@ with tab_tw:
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
         cond = stock.get('condition', '>=') 
-        ai_advice = stock.get('ai_advice', '') # AI 雙向算價記憶
+        ai_advice = stock.get('ai_advice', '') 
         
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
         if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
-            # 🚀 報價跳動：優先讀取 Bulk API 超即時報價
+            # 🚀 報價核心：主引擎若空，立刻呼叫備用引擎，保證有價！
             live_cp, live_pp = live_price_dict.get(code, (None, None))
+            if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=False)
+            
             curr_p = live_cp if live_cp is not None else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🔥 保證完整保留的 5K / 15K 爆量動能偵測引擎
-            vol_alert_msg = ""
-            vol_info = ""
+            # 🔥 保證完整保留：5K / 15K 爆量動能雷達
+            vol_alert_msg = ""; vol_info = ""
             if len(df_1m) >= 15:
                 df_1m['Volume'] = df_1m['Volume'].fillna(0)
                 avg_vol_1m = df_1m['Volume'].mean()
@@ -355,7 +341,6 @@ with tab_tw:
                     vol_15m = df_1m['Volume'].tail(15).sum()
                     ratio_5k = vol_5m / (avg_vol_1m * 5)
                     ratio_15k = vol_15m / (avg_vol_1m * 15)
-                    
                     vol_info = f"量能比例: 5K({ratio_5k:.1f}x) | 15K({ratio_15k:.1f}x)"
                     if ratio_5k > 2.5: vol_alert_msg += "🔥 5K急行爆量！ "
                     if ratio_15k > 2.0: vol_alert_msg += "🔥 15K波段爆量！"
@@ -383,12 +368,9 @@ with tab_tw:
                 with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
-                
-                # 保證爆量警訊渲染
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
                 elif vol_info: st.caption(f"📉 {vol_info}")
 
-                # 保證 AI 雙向算價渲染
                 if ai_advice: st.success(ai_advice)
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
@@ -407,7 +389,7 @@ with tab_tw:
                         st.rerun()
                 with c_ai:
                     st.write("") 
-                    # 🤖 保證完整保留的 AI 雙向算價引擎
+                    # 🤖 保證完整保留：AI 雙向進出場算價
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
@@ -429,7 +411,7 @@ with tab_tw:
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
-                # 🔗 保證完整展示的連動股：即時報價、漲跌金額、與漲幅百分比
+                # 🔗 保證完整展示的連動股：即時跳動報價、漲幅！
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -437,11 +419,12 @@ with tab_tw:
                         c_name = all_stocks.get(c, c)
                         icon = "👑" if i == 0 else "🔗"
                         cp, pp = live_price_dict.get(c, (None, None))
+                        if cp is None: cp, pp = get_single_live_price(c, is_us=False) # 備用引擎
+                        
                         if cp is not None and pp is not None and pp > 0:
                             diff = cp - pp
                             pct = (diff / pp) * 100
                             sign = "+" if diff > 0 else ""
-                            # 精準組裝：圖示、名字、代碼、價格、漲跌幅
                             corr_display.append(f"{icon} {c_name}({c}) {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
                         else:
                             corr_display.append(f"{icon} {c_name}({c})")
@@ -459,11 +442,12 @@ with tab_us:
         ai_advice = stock.get('ai_advice', '')
         
         live_cp, live_pp = live_price_dict.get(code, (None, None))
+        if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=True)
+        
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
         if live_cp is not None and not df_daily.empty:
             curr_p = live_cp
-            prev_p = live_pp
             
             is_alert = False
             if t_price > 0:
@@ -524,7 +508,7 @@ with tab_us:
                             except: pass
 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+                c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
                 
@@ -534,6 +518,8 @@ with tab_us:
                     for i, c in enumerate(corr_codes):
                         icon = "👑" if i == 0 else "🔗"
                         cp, pp = live_price_dict.get(c, (None, None))
+                        if cp is None: cp, pp = get_single_live_price(c, is_us=True)
+                        
                         if cp is not None and pp is not None and pp > 0:
                             diff = cp - pp
                             pct = (diff / pp) * 100
