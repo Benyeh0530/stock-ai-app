@@ -345,18 +345,21 @@ with tab_tw:
                     if ratio_5k > 2.5: vol_alert_msg += "🔥 5K急行爆量！ "
                     if ratio_15k > 2.0: vol_alert_msg += "🔥 15K波段爆量！"
             
+            # 🚀 組合給 Telegram 用的動能字串
+            tg_vol_str = f"\n📊 動能: {vol_alert_msg.strip()} {vol_info}".strip() if vol_info else ""
+
             is_alert = False
             if t_price > 0:
                 if cond == ">=" and curr_p >= t_price:
                     is_alert = True
                     if not stock.get('alert_triggered', False):
-                        send_telegram_alert(f"📈 🚨【台股作多/停損】\n{name}({code}) 已『漲破』目標價！\n現價：{curr_p}\n警示價：{t_price}")
+                        send_telegram_alert(f"📈 🚨【台股作多/停損】\n{name}({code}) 已『漲破』目標價！\n現價：{curr_p}\n警示價：{t_price}\n{tg_vol_str}")
                         st.session_state.tw_stocks[idx]['alert_triggered'] = True
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                 elif cond == "<=" and curr_p <= t_price:
                     is_alert = True
                     if not stock.get('alert_triggered', False):
-                        send_telegram_alert(f"📉 🚨【台股作空/停損】\n{name}({code}) 已『跌穿』目標價！\n現價：{curr_p}\n警示價：{t_price}")
+                        send_telegram_alert(f"📉 🚨【台股作空/停損】\n{name}({code}) 已『跌穿』目標價！\n現價：{curr_p}\n警示價：{t_price}\n{tg_vol_str}")
                         st.session_state.tw_stocks[idx]['alert_triggered'] = True
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                 if cond == ">=" and curr_p < t_price * 0.995: st.session_state.tw_stocks[idx]['alert_triggered'] = False
@@ -389,12 +392,13 @@ with tab_tw:
                         st.rerun()
                 with c_ai:
                     st.write("") 
-                    # 🤖 保證完整保留：AI 雙向進出場算價
+                    # 🤖 保證完整保留：AI 雙向進出場算價 + 🚀 數學防呆鎖
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
                                 dir_str = '作多' if cond=='>=' else '作空'
-                                prompt = f"針對台股 {name}({code}) 現價 {curr_p}，給出當沖{dir_str}建議。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
+                                math_rule = "停利目標價必須大於進場價" if cond=='>=' else "停利目標價必須小於進場價"
+                                prompt = f"針對台股 {name}({code}) 現價 {curr_p}，給出當沖{dir_str}建議。嚴格限制：{math_rule}。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
                                 res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
                                 match = re.search(r'\{.*\}', res, re.DOTALL)
                                 if match:
@@ -491,11 +495,13 @@ with tab_us:
                         st.rerun()
                 with c_ai:
                     st.write("") 
+                    # 🤖 保證完整保留：AI 雙向進出場算價 + 🚀 數學防呆鎖
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_us_{code}"):
                         with st.spinner("..."):
                             try:
                                 dir_str = '作多' if cond=='>=' else '作空'
-                                prompt = f"針對美股 {code} 現價 {curr_p}，給出波段{dir_str}建議。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
+                                math_rule = "停利目標價必須大於進場價" if cond=='>=' else "停利目標價必須小於進場價"
+                                prompt = f"針對美股 {code} 現價 {curr_p}，給出波段{dir_str}建議。嚴格限制：{math_rule}。必須嚴格回傳JSON格式：{{\"entry\": 進場價數字, \"target\": 停利目標價數字}}"
                                 res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
                                 match = re.search(r'\{.*\}', res, re.DOTALL)
                                 if match:
