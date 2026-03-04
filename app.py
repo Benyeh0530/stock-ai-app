@@ -51,12 +51,12 @@ def cb_add_tw(code, name, target_price=0.0, condition=">="):
     for s in st.session_state.tw_stocks:
         if s['code'] == code:
             exists = True
-            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
+            s['alerts'].append({"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
             break
     if not exists:
         st.session_state.tw_stocks.append({
             "code": code, "name": name, 
-            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
+            "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
             "ai_advice": "", "vol_alert_triggered": False
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
@@ -66,12 +66,12 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
     for s in st.session_state.us_stocks:
         if s['code'] == code:
             exists = True
-            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
+            s['alerts'].append({"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
             break
     if not exists:
         st.session_state.us_stocks.append({
             "code": code, "name": name, 
-            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
+            "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
             "ai_advice": ""
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
@@ -91,7 +91,7 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與向下相容升級
+# 初始化與舊資料向下相容升級 (包含動態均線支援)
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -99,16 +99,18 @@ if 'initialized' not in st.session_state:
     
     for s in tw_data:
         if 'alerts' not in s:
-            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
+            s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
             for al in s['alerts']:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
+                if 'type' not in al: al['type'] = "固定價格"
     for s in us_data:
         if 'alerts' not in s:
-            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
+            s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
             for al in s['alerts']:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
+                if 'type' not in al: al['type'] = "固定價格"
 
     st.session_state.tw_stocks = tw_data
     st.session_state.us_stocks = us_data
@@ -166,6 +168,18 @@ def get_index_mas(code='^TWII'):
     except: pass
     return None
 
+# 🚀 新增：K線抓取通用引擎 (支援強制指定時間戳刷新)
+@st.cache_data(show_spinner=False)
+def get_kline_data(code, suffix, interval, time_key):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval={interval}&range=5d"
+        res = requests.get(url, headers=headers, timeout=3).json()
+        idx = pd.to_datetime(res['chart']['result'][0]['timestamp'], unit='s', utc=True)
+        df = pd.DataFrame({'Close': res['chart']['result'][0]['indicators']['quote'][0]['close']}, index=idx).dropna()
+        return df
+    except: return pd.DataFrame()
+
 @st.cache_data(ttl=900)
 def get_historical_features(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -188,17 +202,9 @@ def get_historical_features(code, is_us=False):
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             df_daily['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-9)))
 
-            ma20_15k = None
-            if not is_us:
-                url_15m = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=15m&range=5d"
-                res_15m = requests.get(url_15m, headers=headers, timeout=5).json()
-                idx_15m = pd.to_datetime(res_15m['chart']['result'][0]['timestamp'], unit='s', utc=True)
-                df_15m = pd.DataFrame({'Close': res_15m['chart']['result'][0]['indicators']['quote'][0]['close']}, index=idx_15m).dropna()
-                ma20_15k = df_15m['Close'].tail(20).mean() if len(df_15m) >= 20 else df_15m['Close'].mean()
-
-            return df_daily, ma20_15k, suffix
+            return df_daily, suffix
         except: continue
-    return pd.DataFrame(), None, ""
+    return pd.DataFrame(), ""
 
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
@@ -284,10 +290,6 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-def extract_price(price_str):
-    match = re.search(r'\d+(\.\d+)?', str(price_str))
-    return float(match.group()) if match else 0.0
-
 # --- 3. 介面渲染 ---
 st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
@@ -305,20 +307,22 @@ for s in st.session_state.us_stocks:
 all_us_to_fetch.add('^TWII')
 live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
 
+# 取得現在台北時間，計算 5K 與 15K 的刷新時間鎖
+now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
+t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
+t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
+
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp: st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
 with col_t2:
     if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {now_tpe.strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
 st.divider()
 
-# ==========================================
-# 🚀 升級優化：人性化台股大盤關鍵均線雷達
-# ==========================================
 twii_mas = get_index_mas('^TWII')
 twii_cp = live_price_dict.get('^TWII', (None, None))[0]
 if twii_cp is None and '台股加權' in market_temp:
@@ -327,14 +331,13 @@ if twii_cp is None and '台股加權' in market_temp:
 if twii_cp and twii_mas:
     st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
     ma_cols = st.columns(4)
-    threshold = 0.003 # 設定 0.3% 叩關警戒線
+    threshold = 0.003
     alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
         dist_pts = twii_cp - ma_val
         dist_pct = dist_pts / ma_val
         
-        # 💡 UI 優化：依據相對位置變換警告顏色與人性化文案
         if abs(dist_pct) <= threshold:
             if dist_pts > 0:
                 ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
@@ -346,14 +349,11 @@ if twii_cp and twii_mas:
             else:
                 ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         
-        # 判斷推播邏輯
         state_key = f"twii_{ma_name}"
         if abs(dist_pct) <= threshold:
             if not st.session_state.market_alert_flags.get(state_key, False):
-                if dist_pts > 0:
-                    msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
-                else:
-                    msg = f"📈 大盤現價 {twii_cp:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
+                if dist_pts > 0: msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
+                else: msg = f"📈 大盤現價 {twii_cp:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
                 alert_msgs.append(msg)
                 st.session_state.market_alert_flags[state_key] = True
         else:
@@ -422,10 +422,24 @@ with tab_tw:
         alerts = stock.get('alerts', [])
         ai_advice = stock.get('ai_advice', '') 
         
-        df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
+        df_daily, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
-        if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
+        # 🚀 抓取 5K 與 15K K線計算動態均線 (依循整點時間鎖刷新)
+        df_5k = get_kline_data(code, suffix, '5m', t5_key)
+        df_15k = get_kline_data(code, suffix, '15m', t15_key)
+        
+        mas = {}
+        if not df_5k.empty:
+            mas['5K3MA'] = df_5k['Close'].tail(3).mean()
+            mas['5K5MA'] = df_5k['Close'].tail(5).mean()
+            mas['5K20MA'] = df_5k['Close'].tail(20).mean()
+        if not df_15k.empty:
+            mas['15K3MA'] = df_15k['Close'].tail(3).mean()
+            mas['15K5MA'] = df_15k['Close'].tail(5).mean()
+            mas['15K20MA'] = df_15k['Close'].tail(20).mean()
+        
+        if not df_1m.empty and not df_daily.empty:
             live_cp, live_pp = live_price_dict.get(code, (None, None))
             if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=False)
             
@@ -476,19 +490,25 @@ with tab_tw:
             triggered_msgs = []
             
             for a_idx, al in enumerate(alerts):
-                t_p = al['price']
+                # 🚀 動態決定警示目標價 (支援動態均線)
+                al_type = al.get('type', '固定價格')
+                if al_type == '固定價格': t_p = al['price']
+                else: t_p = mas.get(al_type, 0.0)
+                
                 cond = al['cond']
                 if t_p > 0:
+                    t_p_label = f"{t_p}" if al_type == '固定價格' else f"{al_type} ({t_p:.2f})"
+                    
                     if cond == ">=" and curr_p >= t_p:
                         is_alert = True
                         if not al['triggered']:
-                            triggered_msgs.append(f"漲破 {t_p}")
+                            triggered_msgs.append(f"漲破 {t_p_label}")
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     elif cond == "<=" and curr_p <= t_p:
                         is_alert = True
                         if not al['triggered']:
-                            triggered_msgs.append(f"跌破 {t_p}")
+                            triggered_msgs.append(f"跌破 {t_p_label}")
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
@@ -502,7 +522,7 @@ with tab_tw:
                             if curr_p <= t_p: touches = max(touches, 1)
 
                         if touches >= 2 and not al.get('touch_2_triggered', False):
-                            send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘內已測試目標價 {t_p} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：{curr_p}\n突破機率大增，請密切留意！{tg_vol_str}")
+                            send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘內已測試目標 {t_p_label} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：{curr_p}\n突破機率大增，請密切留意！{tg_vol_str}")
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
@@ -527,8 +547,22 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
                 
+                # 🚀 顯示最新計算的 5K 與 15K 動態均線數據
+                if mas:
+                    st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
+
                 for a_idx, al in enumerate(alerts):
-                    c_cond, c_inp, c_del_al = st.columns([2, 3, 1])
+                    c_type, c_cond, c_inp, c_del_al = st.columns([2, 2, 3, 1])
+                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA"]
+                    current_type = al.get('type', "固定價格")
+                    
+                    with c_type:
+                        new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_tw_{code}_{a_idx}", label_visibility="collapsed")
+                        if new_type != current_type:
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['type'] = new_type
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            st.rerun()
                     with c_cond:
                         new_cond = st.selectbox("方向", [">= 漲破", "<= 跌破"], index=0 if al['cond'] == ">=" else 1, key=f"cond_tw_{code}_{a_idx}", label_visibility="collapsed")
                         new_cond_val = ">=" if ">=" in new_cond else "<="
@@ -536,16 +570,18 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
-                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_inp:
-                        new_t_price = st.number_input("警示價", value=float(al['price']), step=0.5, key=f"inp_{code}_{a_idx}", label_visibility="collapsed")
-                        if new_t_price != al['price']:
-                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
-                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
-                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
-                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                            st.rerun()
+                        if current_type == "固定價格":
+                            new_t_price = st.number_input("警示價", value=float(al['price']), step=0.5, key=f"inp_{code}_{a_idx}", label_visibility="collapsed")
+                            if new_t_price != al['price']:
+                                st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
+                                st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                                st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                                st.rerun()
+                        else:
+                            ma_val = mas.get(current_type, 0.0)
+                            st.markdown(f"<div style='padding-top:5px; color:#aaa;'>自動追蹤現值: **{ma_val:.2f}**</div>", unsafe_allow_html=True)
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_{code}_{a_idx}"):
                             st.session_state.tw_stocks[idx]['alerts'].pop(a_idx)
@@ -555,8 +591,7 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([1, 1, 2])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"):
-                        st.session_state.tw_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
-                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
                         st.rerun()
                 with c_btn2:
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_{code}"):
@@ -571,6 +606,7 @@ with tab_tw:
                                 if match:
                                     data = json.loads(match.group(0))
                                     if alerts:
+                                        st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
                                         st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
                                         st.session_state.tw_stocks[idx]['alerts'][0]['triggered'] = False
                                         st.session_state.tw_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
@@ -614,11 +650,24 @@ with tab_us:
         alerts = stock.get('alerts', [])
         ai_advice = stock.get('ai_advice', '')
         
+        df_daily, suffix = get_historical_features(code, is_us=True)
+        df_1m_us = get_realtime_tick(code, suffix)
+        
+        df_5k = get_kline_data(code, suffix, '5m', t5_key)
+        df_15k = get_kline_data(code, suffix, '15m', t15_key)
+        
+        mas = {}
+        if not df_5k.empty:
+            mas['5K3MA'] = df_5k['Close'].tail(3).mean()
+            mas['5K5MA'] = df_5k['Close'].tail(5).mean()
+            mas['5K20MA'] = df_5k['Close'].tail(20).mean()
+        if not df_15k.empty:
+            mas['15K3MA'] = df_15k['Close'].tail(3).mean()
+            mas['15K5MA'] = df_15k['Close'].tail(5).mean()
+            mas['15K20MA'] = df_15k['Close'].tail(20).mean()
+
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=True)
-        
-        df_daily, _, suffix = get_historical_features(code, is_us=True)
-        df_1m_us = get_realtime_tick(code, suffix)
         
         if live_cp is not None and not df_daily.empty:
             curr_p = live_cp
@@ -636,19 +685,24 @@ with tab_us:
             triggered_msgs = []
             
             for a_idx, al in enumerate(alerts):
-                t_p = al['price']
+                al_type = al.get('type', '固定價格')
+                if al_type == '固定價格': t_p = al['price']
+                else: t_p = mas.get(al_type, 0.0)
+
                 cond = al['cond']
                 if t_p > 0:
+                    t_p_label = f"${t_p}" if al_type == '固定價格' else f"{al_type} (${t_p:.2f})"
+
                     if cond == ">=" and curr_p >= t_p:
                         is_alert = True
                         if not al['triggered']:
-                            triggered_msgs.append(f"漲破 ${t_p}")
+                            triggered_msgs.append(f"漲破 {t_p_label}")
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     elif cond == "<=" and curr_p <= t_p:
                         is_alert = True
                         if not al['triggered']:
-                            triggered_msgs.append(f"跌破 ${t_p}")
+                            triggered_msgs.append(f"跌破 {t_p_label}")
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
@@ -662,7 +716,7 @@ with tab_us:
                             if curr_p <= t_p: touches = max(touches, 1)
 
                         if touches >= 2 and not al.get('touch_2_triggered', False):
-                            send_telegram_alert(f"⚠️ 🦅【美股叩關確認】\n{code} 近 15 分鐘內已測試目標價 ${t_p} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：${curr_p}")
+                            send_telegram_alert(f"⚠️ 🦅【美股叩關確認】\n{code} 近 15 分鐘內已測試目標 {t_p_label} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：${curr_p}")
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -685,8 +739,21 @@ with tab_us:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.success(ai_advice)
                 
+                if mas:
+                    st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
+
                 for a_idx, al in enumerate(alerts):
-                    c_cond, c_inp, c_del_al = st.columns([2, 3, 1])
+                    c_type, c_cond, c_inp, c_del_al = st.columns([2, 2, 3, 1])
+                    opts = ["固定價格", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA"]
+                    current_type = al.get('type', "固定價格")
+                    
+                    with c_type:
+                        new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_us_{code}_{a_idx}", label_visibility="collapsed")
+                        if new_type != current_type:
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['type'] = new_type
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                            st.rerun()
                     with c_cond:
                         new_cond = st.selectbox("方向", [">= 漲破", "<= 跌破"], index=0 if al['cond'] == ">=" else 1, key=f"cond_us_{code}_{a_idx}", label_visibility="collapsed")
                         new_cond_val = ">=" if ">=" in new_cond else "<="
@@ -694,16 +761,18 @@ with tab_us:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
-                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                             st.rerun()
                     with c_inp:
-                        new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
-                        if new_t_price != al['price']:
-                            st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
-                            st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
-                            st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
-                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                            st.rerun()
+                        if current_type == "固定價格":
+                            new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
+                            if new_t_price != al['price']:
+                                st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
+                                st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                                st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                                st.rerun()
+                        else:
+                            ma_val = mas.get(current_type, 0.0)
+                            st.markdown(f"<div style='padding-top:5px; color:#aaa;'>自動追蹤現值: **${ma_val:.2f}**</div>", unsafe_allow_html=True)
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"):
                             st.session_state.us_stocks[idx]['alerts'].pop(a_idx)
@@ -713,8 +782,7 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([1, 1, 2])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"):
-                        st.session_state.us_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
-                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                        st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
                         st.rerun()
                 with c_btn2:
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
@@ -729,6 +797,7 @@ with tab_us:
                                 if match:
                                     data = json.loads(match.group(0))
                                     if alerts:
+                                        st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
                                         st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
                                         st.session_state.us_stocks[idx]['alerts'][0]['triggered'] = False
                                         st.session_state.us_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
