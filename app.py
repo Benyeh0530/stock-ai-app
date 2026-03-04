@@ -51,7 +51,6 @@ def cb_add_tw(code, name, target_price=0.0, condition=">="):
     for s in st.session_state.tw_stocks:
         if s['code'] == code:
             exists = True
-            # 🚀 擴充：加入 touch_2_triggered 記憶點
             s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
             break
     if not exists:
@@ -98,7 +97,6 @@ if 'initialized' not in st.session_state:
     tw_data = data.get("tw", [])
     us_data = data.get("us", [])
     
-    # 升級舊資料：補齊多重警示與二次叩關屬性
     for s in tw_data:
         if 'alerts' not in s:
             s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
@@ -117,6 +115,11 @@ if 'initialized' not in st.session_state:
     st.session_state.ai_report_dt = None
     st.session_state.ai_report_swing = None
     st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
+    
+    # 🚀 新增：大盤均線雷達推播的冷卻標記
+    if 'market_alert_flags' not in st.session_state:
+        st.session_state.market_alert_flags = {}
+        
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
@@ -145,6 +148,25 @@ def get_market_temp():
             if len(closes) >= 2: results[name] = (closes[-1], ((closes[-1] - closes[-2]) / closes[-2]) * 100)
         except: pass
     return results
+
+# 🚀 新增引擎：專門計算大盤(加權指數)歷史均線，每 5 分鐘重算一次以節省資源
+@st.cache_data(ttl=300)
+def get_index_mas(code='^TWII'):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=6mo"
+        res = requests.get(url, headers=headers, timeout=5).json()
+        closes = res['chart']['result'][0]['indicators']['quote'][0]['close']
+        df = pd.DataFrame({'Close': closes}).dropna()
+        if len(df) >= 60:
+            return {
+                '3日線': df['Close'].tail(3).mean(),
+                '5日線': df['Close'].tail(5).mean(),
+                '月線(20MA)': df['Close'].tail(20).mean(),
+                '季線(60MA)': df['Close'].tail(60).mean()
+            }
+    except: pass
+    return None
 
 @st.cache_data(ttl=900)
 def get_historical_features(code, is_us=False):
@@ -280,8 +302,11 @@ for s in st.session_state.us_stocks:
     all_us_to_fetch.add(s['code'])
     all_us_to_fetch.update(get_correlated_stocks(s['code'], s['code'], True))
 
+# 🚀 將大盤代碼加入美股名單(因為免後綴)一起無敵批次抓取即時價格
+all_us_to_fetch.add('^TWII')
 live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
 
+# 頂端大盤溫度
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
     if '台股加權' in market_temp: st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
@@ -290,7 +315,49 @@ with col_t2:
 with col_t3:
     if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {datetime.datetime.now().strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
+
 st.divider()
+
+# ==========================================
+# 🚀 全新功能：台股大盤關鍵均線雷達與自動推播
+# ==========================================
+twii_mas = get_index_mas('^TWII')
+twii_cp = live_price_dict.get('^TWII', (None, None))[0]
+if twii_cp is None and '台股加權' in market_temp:
+    twii_cp = market_temp['台股加權'][0]
+
+if twii_cp and twii_mas:
+    st.markdown("##### 📊 台股大盤關鍵均線雷達")
+    ma_cols = st.columns(4)
+    threshold = 0.003 # 設定 0.3% 為「即將觸碰」的警戒線
+    alert_msgs = []
+    
+    for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
+        dist_pts = twii_cp - ma_val
+        dist_pct = dist_pts / ma_val
+        
+        # 渲染畫面 UI
+        ma_cols[idx].metric(f"{ma_name} ({ma_val:.0f})", f"距 {dist_pts:+.0f} 點", f"{dist_pct*100:+.2f}%", delta_color="normal" if dist_pct > 0 else "inverse")
+        
+        # 判斷推播邏輯
+        state_key = f"twii_{ma_name}"
+        if abs(dist_pct) <= threshold:
+            if not st.session_state.market_alert_flags.get(state_key, False):
+                if dist_pts > 0:
+                    msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
+                else:
+                    msg = f"📈 大盤現價 {twii_cp:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
+                alert_msgs.append(msg)
+                st.session_state.market_alert_flags[state_key] = True
+        else:
+            # 遠離均線後解除標記，準備下次攻擊再叫
+            st.session_state.market_alert_flags[state_key] = False
+            
+    if alert_msgs:
+        full_msg = "⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs)
+        send_telegram_alert(full_msg)
+    
+    st.divider()
 
 with st.sidebar:
     st.header("🤖 選股報告分流")
@@ -406,7 +473,6 @@ with tab_tw:
                 t_p = al['price']
                 cond = al['cond']
                 if t_p > 0:
-                    # 🚀 功能 1：一般瞬間觸碰推播
                     if cond == ">=" and curr_p >= t_p:
                         is_alert = True
                         if not al['triggered']:
@@ -420,7 +486,6 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
-                    # 🚀 功能 2：二次叩關推播 (分析近 15 根 K 線)
                     if len(df_1m) >= 15:
                         touches = 0
                         if cond == ">=":
@@ -435,7 +500,6 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
-                    # 重置邏輯 (當價格稍微遠離時，重置所有警報，讓主力再次攻擊時能重新推播)
                     if cond == ">=" and curr_p < t_p * 0.995: 
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
@@ -579,7 +643,6 @@ with tab_us:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
-                    # 🚀 美股一樣加入二次叩關偵測
                     if not df_1m_us.empty and len(df_1m_us) >= 15:
                         touches = 0
                         if cond == ">=":
