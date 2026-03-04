@@ -10,13 +10,13 @@ import re
 import time
 import os
 import numpy as np
-import altair as alt # 🚀 引入專業資料視覺化套件
+import altair as alt # 🚀 專業繪圖引擎
 
 # --- 基礎設定 ---
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 🎨 首席設計師的 CSS 視覺美化 ---
+# --- 🎨 首席設計師的 CSS 視覺美化 (核彈級文字修復) ---
 st.markdown("""
 <style>
     /* 整體背景與間距微調 */
@@ -31,21 +31,36 @@ st.markdown("""
         text-shadow: 0px 2px 4px rgba(0,0,0,0.1);
     }
 
-    /* 🚀 修復：強制側邊欄所有文字、標題、說明標籤變成亮白粗體 */
-    [data-testid="stSidebar"] label p,
-    [data-testid="stSidebar"] .stMarkdown p,
-    [data-testid="stSidebar"] .stMarkdown h1,
-    [data-testid="stSidebar"] .stMarkdown h2,
-    [data-testid="stSidebar"] .stMarkdown h3,
-    [data-testid="stSidebar"] .stCheckbox p,
-    [data-testid="stSidebar"] div[data-baseweb="select"] span {
-        color: #f8fafc !important;
+    /* 🚀 終極修復：暴力強制側邊欄所有文字變成純白高光 */
+    section[data-testid="stSidebar"] {
+        background-color: #0f172a !important; /* 深海藍底色 */
+        border-right: 1px solid #1e293b;
+    }
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span,
+    section[data-testid="stSidebar"] div.stMarkdown {
+        color: #ffffff !important; 
         font-weight: 600 !important;
         text-shadow: 0px 1px 2px rgba(0,0,0,0.8);
     }
-    /* 側邊欄輸入框的提示文字 */
-    [data-testid="stSidebar"] input::placeholder {
-        color: #94a3b8 !important;
+
+    /* 確保下拉選單與輸入框裡面的字不會變成白底白字 */
+    section[data-testid="stSidebar"] div[data-baseweb="select"] span,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] li {
+        color: #0f172a !important; 
+        text-shadow: none !important;
+    }
+    section[data-testid="stSidebar"] input {
+        color: #0f172a !important;
+        background-color: #ffffff !important;
+        text-shadow: none !important;
+    }
+    section[data-testid="stSidebar"] input::placeholder {
+        color: #64748b !important;
     }
     
     /* 數據面板字體強化 */
@@ -69,17 +84,14 @@ st.markdown("""
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
     }
 
-    /* 側邊欄背景 */
-    section[data-testid="stSidebar"] {
-        background-color: #0f172a;
-        border-right: 1px solid #1e293b;
-    }
-    
     /* 按鈕高質感漸層 */
     button[kind="primary"] {
         background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-        color: white; font-weight: 600; border: none; border-radius: 8px;
+        color: white !important; font-weight: 600; border: none; border-radius: 8px;
         box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
+    }
+    button[kind="primary"] * {
+        color: white !important; text-shadow: none !important;
     }
     button[kind="primary"]:hover {
         background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
@@ -172,6 +184,7 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
+# 初始化與舊資料向下相容
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -364,7 +377,7 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-# 🚀 升級版：支援磁吸游標與動態放大的高質感走勢圖 (徹底消滅死魚線)
+# 🚀 升級版：專業級 Altair 磁吸走勢圖 (完全消滅死魚線)
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     if df_1m.empty: return
     
@@ -377,7 +390,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     color_range = ['#3b82f6'] # 藍色現價
 
     if 'VWAP' in df_1m.columns:
-        # 🚀 防呆機制：將 VWAP 異常的 0 值替換為現價，避免拉大 Y 軸
+        # 🚀 防呆機制：將 VWAP 剛開盤時可能出現的 0 替換為現價，避免 Y 軸被極度壓縮
         vwap_clean = df_1m['VWAP'].replace(0, np.nan).bfill().fillna(df_1m['Close'])
         chart_df['當日VWAP(均線)'] = vwap_clean
         color_domain.append('當日VWAP(均線)')
@@ -391,7 +404,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     
     df_melted = chart_df.melt('Time', var_name='線型', value_name='價格')
     
-    # 🚀 動態精準計算 Y 軸上下限 (過濾異常 0 值，上下各留 0.5% 緩衝)
+    # 🚀 動態精準計算 Y 軸上下限 (過濾異常 0 值，上下各留 0.5% 緩衝空間)
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
     if not valid_prices.empty:
         y_min = valid_prices.min() * 0.995
@@ -399,7 +412,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     else:
         y_min, y_max = 0, 100
 
-    # 建立多線圖
+    # 建立多線圖基礎
     base = alt.Chart(df_melted).encode(x=alt.X('Time:T', title='', axis=alt.Axis(format='%H:%M', grid=False, tickCount=10)))
     
     line = base.mark_line(strokeWidth=2.5).encode(
@@ -407,19 +420,21 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
         color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0))
     )
 
-    # 🚀 磁吸互動層 (滑鼠靠近立刻吸附並顯示資訊)
+    # 🚀 磁吸互動層 (Hover)：建立隱形的十字準星
     hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
 
+    # 滑鼠靠近時浮現圓點並顯示 Tooltip
     points = line.mark_circle(size=80).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0)),
         tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]
     ).add_params(hover)
 
+    # 垂直虛線
     rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
 
-    chart = alt.layer(line, rules, points).properties(height=220).interactive()
+    chart = alt.layer(line, rules, points).properties(height=220).interactive(bind_y=False)
     st.altair_chart(chart, use_container_width=True)
 
 # --- 3. 介面渲染 ---
@@ -567,12 +582,11 @@ with tab_tw:
         
         cdp_nh = cdp_nl = 0.0
         if not df_1m.empty and not df_daily.empty:
-            # 🚀 精算當日 VWAP
+            # 🚀 精算當日 VWAP，解決除以零產生的 nan
             df_1m['Typical_Price'] = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
-            # 避免初始除以零的錯誤
             df_1m['Cum_Vol'] = df_1m['Volume'].cumsum().replace(0, np.nan)
             df_1m['Cum_PV'] = (df_1m['Typical_Price'] * df_1m['Volume']).cumsum()
-            df_1m['VWAP'] = (df_1m['Cum_PV'] / df_1m['Cum_Vol']).fillna(method='bfill').fillna(df_1m['Close'])
+            df_1m['VWAP'] = (df_1m['Cum_PV'] / df_1m['Cum_Vol']).bfill().fillna(df_1m['Close'])
             vwap = df_1m['VWAP'].iloc[-1]
             mas['當日VWAP'] = vwap
 
@@ -692,7 +706,7 @@ with tab_tw:
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
 
-                # 🚀 專業級磁吸動態微縮走勢圖 (內含 VWAP 均線)
+                # 🚀 專業級磁吸動態微縮走勢圖 (內含 VWAP 橘色主力均線)
                 render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False)
 
                 for a_idx, al in enumerate(alerts):
@@ -815,7 +829,7 @@ with tab_us:
             df_1m_us['Typical_Price'] = (df_1m_us['High'] + df_1m_us['Low'] + df_1m_us['Close']) / 3
             df_1m_us['Cum_Vol'] = df_1m_us['Volume'].cumsum().replace(0, np.nan)
             df_1m_us['Cum_PV'] = (df_1m_us['Typical_Price'] * df_1m_us['Volume']).cumsum()
-            df_1m_us['VWAP'] = (df_1m_us['Cum_PV'] / df_1m_us['Cum_Vol']).fillna(method='bfill').fillna(df_1m_us['Close'])
+            df_1m_us['VWAP'] = (df_1m_us['Cum_PV'] / df_1m_us['Cum_Vol']).bfill().fillna(df_1m_us['Close'])
             vwap_us = df_1m_us['VWAP'].iloc[-1]
             mas['當日VWAP'] = vwap_us
 
