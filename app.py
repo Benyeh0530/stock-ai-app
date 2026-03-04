@@ -9,6 +9,7 @@ import json
 import re
 import time
 import os
+import copy
 import numpy as np
 
 # --- 基礎設定 ---
@@ -154,7 +155,7 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 終極修復：批次抓取所有報價 (防 Yahoo 封鎖)
+# 🚀 終極修復 2：分批次抓取報價，防 Yahoo 封鎖
 def get_bulk_live_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes:
@@ -166,19 +167,24 @@ def get_bulk_live_prices(tw_codes, us_codes):
     
     prices = {}
     headers = {"User-Agent": "Mozilla/5.0"}
-    sym_str = ",".join(symbols)
-    try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym_str}&_t={int(time.time())}"
-        res = requests.get(url, headers=headers, timeout=5).json()
-        results = res.get('quoteResponse', {}).get('result', [])
-        for r in results:
-            sym = r.get('symbol', '')
-            base_sym = sym.replace('.TW', '').replace('.TWO', '')
-            curr_p = r.get('regularMarketPrice')
-            prev_p = r.get('regularMarketPreviousClose', curr_p)
-            if curr_p:
-                prices[base_sym] = (curr_p, prev_p)
-    except: pass
+    
+    # 每次最多塞 10 檔進去問 Yahoo，避免網址過長直接報錯
+    chunk_size = 10
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i + chunk_size]
+        sym_str = ",".join(chunk)
+        try:
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym_str}&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=5).json()
+            results = res.get('quoteResponse', {}).get('result', [])
+            for r in results:
+                sym = r.get('symbol', '')
+                base_sym = sym.replace('.TW', '').replace('.TWO', '')
+                curr_p = r.get('regularMarketPrice')
+                prev_p = r.get('regularMarketPreviousClose', curr_p)
+                if curr_p:
+                    prices[base_sym] = (curr_p, prev_p)
+        except: pass
     return prices
 
 @st.cache_data(ttl=43200)
@@ -196,13 +202,28 @@ def fetch_ai_list(report_type):
         return json.loads(match.group(0))
     except: return None
 
+# 🚀 終極修復 1：掛載正規表達式 (Regex) 防護網，強制挖出純代碼
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
     try:
-        res = ai_model.generate_content(f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。回傳純代碼逗號分隔，不要多餘文字。", generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        return [c.strip() for c in res.split(',') if c.strip() != ''][:3]
+        prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，用逗號分隔，不要任何中文或說明文字。"
+        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        
+        # 強制只抓數字或英文字母，徹底封殺 AI 的雞婆中文
+        if is_us:
+            codes = re.findall(r'[A-Z]+', res.upper())
+        else:
+            codes = re.findall(r'\d{4,}', res)
+            
+        seen = set()
+        uniq = []
+        for c in codes:
+            if c not in seen and c != code: # 也順便過濾掉自己本身
+                seen.add(c)
+                uniq.append(c)
+        return uniq[:3]
     except: return []
 
 def extract_price(price_str):
@@ -313,19 +334,18 @@ with tab_tw:
         code, name = stock['code'], stock['name']
         t_price = stock.get('target_price', 0.0)
         cond = stock.get('condition', '>=') 
-        ai_advice = stock.get('ai_advice', '') # AI 雙向算價記憶
+        ai_advice = stock.get('ai_advice', '') 
         
         df_daily, ma20_15k, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
         if not df_1m.empty and ma20_15k is not None and not df_daily.empty:
-            # 🚀 報價跳動防死機：優先讀取 Bulk API 超即時報價
             live_cp, live_pp = live_price_dict.get(code, (None, None))
             curr_p = live_cp if live_cp else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp else df_daily['Close'].iloc[-2]
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 功能回歸：5K / 15K 爆量動能偵測引擎
+            # 🔥 保證完整保留的 5K / 15K 爆量動能偵測引擎
             vol_alert_msg = ""
             vol_info = ""
             if len(df_1m) >= 15:
@@ -364,11 +384,9 @@ with tab_tw:
                 with c_del: st.button("❌ 移除", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發 {cond} 目標 {t_price}")
-                # 確保爆量警訊渲染
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
                 elif vol_info: st.caption(f"📉 {vol_info}")
 
-                # 確保 AI 雙向算價渲染
                 if ai_advice: st.success(ai_advice)
                 
                 c_cond, c_inp, c_ai = st.columns([1.5, 2, 1])
@@ -387,7 +405,7 @@ with tab_tw:
                         st.rerun()
                 with c_ai:
                     st.write("") 
-                    # 🚀 功能回歸：AI 雙向算價引擎 (進場 + 目標)
+                    # 🤖 保證完整保留的 AI 雙向算價引擎
                     if API_KEY and st.button("🤖 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
@@ -409,7 +427,7 @@ with tab_tw:
                 c2.metric("當日VWAP", f"{vwap:.2f}")
                 c3.metric("15K 20MA", f"{ma20_15k:.2f}")
                 
-                # 🚀 功能回歸：連動股即時報價、漲跌與幅度
+                # 🔗 保證完整展示的連動股：即時報價、漲跌金額、與漲幅百分比
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -421,7 +439,8 @@ with tab_tw:
                             diff = cp - pp
                             pct = (diff / pp) * 100
                             sign = "+" if diff > 0 else ""
-                            corr_display.append(f"{icon} {c_name} {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
+                            # 精準組裝：圖示、名字、代碼、價格、漲跌幅
+                            corr_display.append(f"{icon} {c_name}({c}) {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
                         else:
                             corr_display.append(f"{icon} {c_name}({c})")
                     st.caption(" | ".join(corr_display))
@@ -437,7 +456,6 @@ with tab_us:
         cond = stock.get('condition', '>=')
         ai_advice = stock.get('ai_advice', '')
         
-        # 🚀 讀取 Bulk API 報價
         curr_p, prev_p = live_price_dict.get(code, (None, None))
         df_daily, _, _ = get_historical_features(code, is_us=True)
         
@@ -505,7 +523,6 @@ with tab_us:
                 c2.metric("波段月線 (20MA)", f"${df_daily['Close'].tail(20).mean():.2f}")
                 c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}", delta_color="off")
                 
-                # 🚀 美股連動股報價顯示
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
