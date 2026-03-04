@@ -91,7 +91,7 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與舊資料向下相容升級 (包含動態均線支援)
+# 初始化與舊資料向下相容升級
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -168,7 +168,6 @@ def get_index_mas(code='^TWII'):
     except: pass
     return None
 
-# 🚀 新增：K線抓取通用引擎 (支援強制指定時間戳刷新)
 @st.cache_data(show_spinner=False)
 def get_kline_data(code, suffix, interval, time_key):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -307,7 +306,6 @@ for s in st.session_state.us_stocks:
 all_us_to_fetch.add('^TWII')
 live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
 
-# 取得現在台北時間，計算 5K 與 15K 的刷新時間鎖
 now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
 t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
@@ -425,7 +423,6 @@ with tab_tw:
         df_daily, suffix = get_historical_features(code, is_us=False)
         df_1m = get_realtime_tick(code, suffix)
         
-        # 🚀 抓取 5K 與 15K K線計算動態均線 (依循整點時間鎖刷新)
         df_5k = get_kline_data(code, suffix, '5m', t5_key)
         df_15k = get_kline_data(code, suffix, '15m', t15_key)
         
@@ -490,7 +487,6 @@ with tab_tw:
             triggered_msgs = []
             
             for a_idx, al in enumerate(alerts):
-                # 🚀 動態決定警示目標價 (支援動態均線)
                 al_type = al.get('type', '固定價格')
                 if al_type == '固定價格': t_p = al['price']
                 else: t_p = mas.get(al_type, 0.0)
@@ -547,7 +543,6 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
                 
-                # 🚀 顯示最新計算的 5K 與 15K 動態均線數據
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
 
@@ -837,7 +832,8 @@ with tab_core:
     st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫")
     for asset in st.session_state.core_assets:
         code, is_us = asset['code'], asset['is_us']
-        df_daily, _, _ = get_historical_features(code, is_us=is_us)
+        # 🚀 Bug 已修復，精準接收 2 個回傳值
+        df_daily, _ = get_historical_features(code, is_us=is_us)
         if not df_daily.empty:
             curr_p = df_daily['Close'].iloc[-1]
             with st.container(border=True):
