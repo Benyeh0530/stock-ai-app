@@ -15,6 +15,89 @@ import numpy as np
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# --- 🎨 首席設計師的 CSS 視覺美化 ---
+st.markdown("""
+<style>
+    /* 整體背景與間距微調 */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    /* 漸層科技感主標題 */
+    h1 {
+        background: -webkit-linear-gradient(45deg, #00f2fe, #4facfe);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 900;
+        letter-spacing: 1px;
+        text-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    /* 數據面板字體強化 */
+    div[data-testid="stMetricValue"] {
+        font-size: 1.9rem;
+        font-weight: 700;
+        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+    label[data-testid="stMetricLabel"] p {
+        font-weight: 600;
+        color: #8b9bb4 !important;
+        font-size: 0.95rem;
+    }
+
+    /* 卡片與邊框圓角立體化 */
+    div[data-testid="stVerticalBlock"] div[style*="border"] {
+        border-radius: 12px !important;
+        border: 1px solid #2d3748 !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+        background-color: rgba(17, 24, 39, 0.4) !important;
+        transition: transform 0.2s ease-in-out;
+    }
+    div[data-testid="stVerticalBlock"] div[style*="border"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
+    }
+
+    /* 側邊欄美化 */
+    section[data-testid="stSidebar"] {
+        background-color: #0f172a;
+        border-right: 1px solid #1e293b;
+    }
+    
+    /* 按鈕高質感漸層 */
+    button[kind="primary"] {
+        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+        color: white;
+        font-weight: 600;
+        border: none;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
+    }
+    button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        box-shadow: 0 6px 8px rgba(37, 99, 235, 0.3);
+    }
+
+    /* 摺疊面板美化 */
+    div[data-testid="stExpander"] {
+        border-radius: 8px !important;
+        border: 1px solid #334155 !important;
+        background-color: rgba(30, 41, 59, 0.5) !important;
+    }
+    div[data-testid="stExpander"] p {
+        font-weight: 600;
+        font-size: 1.05rem;
+    }
+
+    /* 分籤頁美化 */
+    div[data-testid="stTabs"] button {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- 1. 引擎設定 ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if API_KEY:
@@ -832,7 +915,6 @@ with tab_core:
     st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫")
     for asset in st.session_state.core_assets:
         code, is_us = asset['code'], asset['is_us']
-        # 🚀 Bug 已修復，精準接收 2 個回傳值
         df_daily, _ = get_historical_features(code, is_us=is_us)
         if not df_daily.empty:
             curr_p = df_daily['Close'].iloc[-1]
