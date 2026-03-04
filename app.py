@@ -45,19 +45,19 @@ def save_watchlist(tw, us):
         with open(DATA_FILE, "w", encoding='utf-8') as f: json.dump({"tw": tw, "us": us}, f, ensure_ascii=False)
     except: pass
 
-# --- 🚀 防彈按鈕 Callbacks (支援多重警示擴充) ---
+# --- 🚀 防彈按鈕 Callbacks ---
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     exists = False
     for s in st.session_state.tw_stocks:
         if s['code'] == code:
             exists = True
-            # 若已存在，直接新增一組新警示
-            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False})
+            # 🚀 擴充：加入 touch_2_triggered 記憶點
+            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
             break
     if not exists:
         st.session_state.tw_stocks.append({
             "code": code, "name": name, 
-            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False}], 
+            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
             "ai_advice": "", "vol_alert_triggered": False
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
@@ -67,12 +67,12 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
     for s in st.session_state.us_stocks:
         if s['code'] == code:
             exists = True
-            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False})
+            s['alerts'].append({"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
             break
     if not exists:
         st.session_state.us_stocks.append({
             "code": code, "name": name, 
-            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False}], 
+            "alerts": [{"price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
             "ai_advice": ""
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
@@ -92,19 +92,25 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與舊資料向下相容升級
+# 初始化與向下相容升級
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
     us_data = data.get("us", [])
     
-    # 無縫升級舊的單一警示結構為 alerts 列表
+    # 升級舊資料：補齊多重警示與二次叩關屬性
     for s in tw_data:
         if 'alerts' not in s:
-            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False)}]
+            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
+        else:
+            for al in s['alerts']:
+                if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
     for s in us_data:
         if 'alerts' not in s:
-            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False)}]
+            s['alerts'] = [{"price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
+        else:
+            for al in s['alerts']:
+                if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
 
     st.session_state.tw_stocks = tw_data
     st.session_state.us_stocks = us_data
@@ -174,7 +180,6 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), None, ""
 
-# 獲取分鐘線計算爆量用
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -186,7 +191,7 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 報價主引擎：真正使用 v8 Spark API (免疫封鎖)
+# 🚀 主引擎 Spark API
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -215,7 +220,7 @@ def get_bulk_spark_prices(tw_codes, us_codes):
         except: pass
     return prices
 
-# 🚀 報價備用引擎
+# 🚀 備用引擎
 @st.cache_data(ttl=3, show_spinner=False)
 def get_single_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -245,7 +250,6 @@ def fetch_ai_list(report_type):
         return json.loads(match.group(0))
     except: return None
 
-# 🚀 AI 防呆網：強制用 Regex 挖出乾淨的 4 碼數字代碼
 @st.cache_data(ttl=86400)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
@@ -267,7 +271,6 @@ st.title("⚡ AI 跨海智能戰情室")
 all_stocks = get_full_stock_db()
 market_temp = get_market_temp()
 
-# 🚀 渲染前先用主引擎統一抓取所有股票
 all_tw_to_fetch = set()
 all_us_to_fetch = set()
 for s in st.session_state.tw_stocks:
@@ -357,7 +360,6 @@ with tab_tw:
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             vwap = ( (df_1m['High'] + df_1m['Low'] + df_1m['Close'])/3 * df_1m['Volume'] ).sum() / (df_1m['Volume'].sum() + 0.001)
             
-            # 🚀 算力全開：Pivot 支撐壓力計算
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
                 y_high = df_daily['High'].iloc[-2]
@@ -367,7 +369,6 @@ with tab_tw:
                 r1 = (2 * pivot) - y_low
                 s1 = (2 * pivot) - y_high
             
-            # 🔥 保證完整保留：5K / 15K 爆量動能雷達
             vol_alert_msg = ""; vol_info = ""
             is_vol_surge = False 
             if len(df_1m) >= 15:
@@ -386,7 +387,6 @@ with tab_tw:
                         vol_alert_msg += "🔥 15K波段爆量！"
                         is_vol_surge = True
 
-            # 🚀 獨立的爆量 Telegram 推播邏輯
             if is_vol_surge:
                 if not stock.get('vol_alert_triggered', False):
                     send_telegram_alert(f"📊 🚨【台股動能異常】\n{name}({code}) 觸發主力爆量！\n現價：{curr_p}\n狀態：{vol_alert_msg.strip()}\n詳細：{vol_info}")
@@ -399,13 +399,14 @@ with tab_tw:
             
             tg_vol_str = f"\n📊 動能: {vol_alert_msg.strip()} {vol_info}".strip() if vol_info else ""
 
-            # 🚀 處理多重到價警示判斷
             is_alert = False
             triggered_msgs = []
+            
             for a_idx, al in enumerate(alerts):
                 t_p = al['price']
                 cond = al['cond']
                 if t_p > 0:
+                    # 🚀 功能 1：一般瞬間觸碰推播
                     if cond == ">=" and curr_p >= t_p:
                         is_alert = True
                         if not al['triggered']:
@@ -419,8 +420,28 @@ with tab_tw:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
-                    if cond == ">=" and curr_p < t_p * 0.995: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
-                    if cond == "<=" and curr_p > t_p * 1.005: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                    # 🚀 功能 2：二次叩關推播 (分析近 15 根 K 線)
+                    if len(df_1m) >= 15:
+                        touches = 0
+                        if cond == ">=":
+                            touches = (df_1m['High'].tail(15) >= t_p).sum()
+                            if curr_p >= t_p: touches = max(touches, 1)
+                        else:
+                            touches = (df_1m['Low'].tail(15) <= t_p).sum()
+                            if curr_p <= t_p: touches = max(touches, 1)
+
+                        if touches >= 2 and not al.get('touch_2_triggered', False):
+                            send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘內已測試目標價 {t_p} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：{curr_p}\n突破機率大增，請密切留意！{tg_vol_str}")
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    
+                    # 重置邏輯 (當價格稍微遠離時，重置所有警報，讓主力再次攻擊時能重新推播)
+                    if cond == ">=" and curr_p < t_p * 0.995: 
+                        st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                        st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                    if cond == "<=" and curr_p > t_p * 1.005: 
+                        st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                        st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
             
             if triggered_msgs:
                 msg_joined = "、".join(triggered_msgs)
@@ -436,7 +457,6 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
                 
-                # 🚀 動態生成多重警示設定 UI
                 for a_idx, al in enumerate(alerts):
                     c_cond, c_inp, c_del_al = st.columns([2, 3, 1])
                     with c_cond:
@@ -445,12 +465,14 @@ with tab_tw:
                         if new_cond_val != al['cond']:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
                             st.rerun()
                     with c_inp:
                         new_t_price = st.number_input("警示價", value=float(al['price']), step=0.5, key=f"inp_{code}_{a_idx}", label_visibility="collapsed")
                         if new_t_price != al['price']:
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
                             st.rerun()
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_{code}_{a_idx}"):
@@ -461,10 +483,9 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([1, 1, 2])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"):
-                        st.session_state.tw_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False})
+                        st.session_state.tw_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
                         st.rerun()
                 with c_btn2:
-                    # 🤖 AI 數學防呆算價
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_{code}"):
                         with st.spinner("..."):
                             try:
@@ -479,6 +500,7 @@ with tab_tw:
                                     if alerts:
                                         st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
                                         st.session_state.tw_stocks[idx]['alerts'][0]['triggered'] = False
+                                        st.session_state.tw_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
                                     st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 AI建議 -> 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
                                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
@@ -488,11 +510,9 @@ with tab_tw:
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
                 c2.metric("當日VWAP", f"{vwap:.2f}")
-                # 🚀 顯示支撐壓力與提示
                 c3.metric("壓力(R1)", f"{r1:.2f}", help="當沖壓力算法：2*Pivot - 昨日最低價")
                 c4.metric("支撐(S1)", f"{s1:.2f}", help="當沖支撐算法：2*Pivot - 昨日最高價")
                 
-                # 🔗 連動股
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -524,12 +544,12 @@ with tab_us:
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         if live_cp is None: live_cp, live_pp = get_single_live_price(code, is_us=True)
         
-        df_daily, _, _ = get_historical_features(code, is_us=True)
+        df_daily, _, suffix = get_historical_features(code, is_us=True)
+        df_1m_us = get_realtime_tick(code, suffix)
         
         if live_cp is not None and not df_daily.empty:
             curr_p = live_cp
             
-            # 🚀 美股支撐壓力計算
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
                 y_high = df_daily['High'].iloc[-2]
@@ -539,9 +559,9 @@ with tab_us:
                 r1 = (2 * pivot) - y_low
                 s1 = (2 * pivot) - y_high
             
-            # 🚀 處理多重警示判斷
             is_alert = False
             triggered_msgs = []
+            
             for a_idx, al in enumerate(alerts):
                 t_p = al['price']
                 cond = al['cond']
@@ -559,8 +579,27 @@ with tab_us:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = True
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     
-                    if cond == ">=" and curr_p < t_p * 0.995: st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
-                    if cond == "<=" and curr_p > t_p * 1.005: st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                    # 🚀 美股一樣加入二次叩關偵測
+                    if not df_1m_us.empty and len(df_1m_us) >= 15:
+                        touches = 0
+                        if cond == ">=":
+                            touches = (df_1m_us['High'].tail(15) >= t_p).sum()
+                            if curr_p >= t_p: touches = max(touches, 1)
+                        else:
+                            touches = (df_1m_us['Low'].tail(15) <= t_p).sum()
+                            if curr_p <= t_p: touches = max(touches, 1)
+
+                        if touches >= 2 and not al.get('touch_2_triggered', False):
+                            send_telegram_alert(f"⚠️ 🦅【美股叩關確認】\n{code} 近 15 分鐘內已測試目標價 ${t_p} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：${curr_p}")
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
+                            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+
+                    if cond == ">=" and curr_p < t_p * 0.995: 
+                        st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                        st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+                    if cond == "<=" and curr_p > t_p * 1.005: 
+                        st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                        st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
 
             if triggered_msgs:
                 msg_joined = "、".join(triggered_msgs)
@@ -582,12 +621,14 @@ with tab_us:
                         if new_cond_val != al['cond']:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
                             st.rerun()
                     with c_inp:
                         new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
                         if new_t_price != al['price']:
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price
                             st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
                             st.rerun()
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"):
@@ -598,7 +639,7 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([1, 1, 2])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"):
-                        st.session_state.us_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False})
+                        st.session_state.us_stocks[idx]['alerts'].append({"price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False})
                         st.rerun()
                 with c_btn2:
                     if API_KEY and st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
@@ -615,6 +656,7 @@ with tab_us:
                                     if alerts:
                                         st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
                                         st.session_state.us_stocks[idx]['alerts'][0]['triggered'] = False
+                                        st.session_state.us_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
                                     st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 AI建議 -> 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
                                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                     st.rerun()
