@@ -115,32 +115,40 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 🚀 升級版：支援當沖/留倉雙模稅率的損益引擎 ---
+# --- 🚀 升級版：精準券商級當沖損益計算引擎 (修復四捨五入誤差) ---
 def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000
-    fee_rate = 0.001425 * 0.18
-    # 💡 判斷稅率：當沖 0.15%，留倉 0.3%
+    discount = 0.18
+    # 證交稅：當沖 0.15%，留倉 0.3%
     tax_rate = 0.0015 if trade_type == "當沖" else 0.003
     
     if direction == "作多":
+        # 買進成本
         buy_val = entry_price * shares
-        buy_fee = int(buy_val * fee_rate)
+        buy_fee_orig = int(buy_val * 0.001425 + 0.5) # 原價四捨五入
+        buy_fee = max(1, int(buy_fee_orig * discount + 0.5)) # 折讓後四捨五入 (低消1元)
         buy_cost = buy_val + buy_fee
         
+        # 賣出淨利
         sell_val = current_price * shares
-        sell_fee = int(sell_val * fee_rate)
-        sell_tax = int(sell_val * tax_rate)
+        sell_fee_orig = int(sell_val * 0.001425 + 0.5)
+        sell_fee = max(1, int(sell_fee_orig * discount + 0.5))
+        sell_tax = int(sell_val * tax_rate) # 交易稅券商公會標準採無條件捨去
         sell_net = sell_val - sell_fee - sell_tax
         
         return sell_net - buy_cost
     else: 
+        # 賣出淨利 (先空)
         sell_val = entry_price * shares
-        sell_fee = int(sell_val * fee_rate)
+        sell_fee_orig = int(sell_val * 0.001425 + 0.5)
+        sell_fee = max(1, int(sell_fee_orig * discount + 0.5))
         sell_tax = int(sell_val * tax_rate)
         sell_net = sell_val - sell_fee - sell_tax
         
+        # 買進成本 (後補)
         buy_val = current_price * shares
-        buy_fee = int(buy_val * fee_rate)
+        buy_fee_orig = int(buy_val * 0.001425 + 0.5)
+        buy_fee = max(1, int(buy_fee_orig * discount + 0.5))
         buy_cost = buy_val + buy_fee
         
         return sell_net - buy_cost
@@ -215,7 +223,7 @@ if 'initialized' not in st.session_state:
     us_data = data.get("us", [])
     
     for s in tw_data:
-        if 'my_trade_type' not in s: s['my_trade_type'] = "當沖" # 升級舊資料屬性
+        if 'my_trade_type' not in s: s['my_trade_type'] = "當沖"
         if 'my_price' not in s: s['my_price'] = 0.0
         if 'my_lots' not in s: s['my_lots'] = 1
         if 'my_dir' not in s: s['my_dir'] = "作多"
@@ -408,7 +416,6 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-# 🚀 專業級 Altair 磁吸走勢圖
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     if df_1m.empty: return
     
@@ -742,7 +749,6 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
 
-                # 🚀 升級版：當沖/留倉 雙模損益試算
                 st.markdown("##### 💰 持倉損益即時試算 (1.8折)")
                 c_pos1, c_pos2, c_pos3, c_pos4, c_pnl = st.columns([1, 1, 1.2, 0.8, 2])
                 with c_pos1:
@@ -761,7 +767,6 @@ with tab_tw:
                         pct_ret = (pnl / cost_base) * 100 if cost_base > 0 else 0
                         st.metric("未實現淨利", f"{pnl:,.0f} 元", f"{pct_ret:+.2f}%", delta_color=pnl_color)
                 
-                # 自動存檔記憶持倉狀態
                 if new_trade_type != stock.get('my_trade_type') or new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_lots != stock.get('my_lots'):
                     st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type
                     st.session_state.tw_stocks[idx]['my_dir'] = new_dir
