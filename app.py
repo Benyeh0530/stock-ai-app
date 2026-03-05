@@ -16,7 +16,7 @@ import altair as alt
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 🎨 首席設計師的 CSS 視覺美化 (深海神盾 + 核彈級文字修復) ---
+# --- 🎨 首席設計師的 CSS 視覺美化 ---
 st.markdown("""
 <style>
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
@@ -176,6 +176,7 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
+# 初始化與向下相容
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -368,6 +369,7 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
+# 🚀 專業級 Altair 磁吸走勢圖
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     if df_1m.empty: return
     
@@ -453,6 +455,9 @@ with col_t3:
 
 st.divider()
 
+# ==========================================
+# 🚀 修復：大盤雷達加入避震緩衝區 (Hysteresis) 與時間鎖防洗版
+# ==========================================
 twii_mas = get_index_mas('^TWII')
 twii_cp = live_price_dict.get('^TWII', (None, None))[0]
 if twii_cp is None and '台股加權' in market_temp:
@@ -462,6 +467,7 @@ if twii_cp and twii_mas:
     st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
     ma_cols = st.columns(4)
     threshold = 0.003
+    reset_threshold = 0.005 # 🚀 避震緩衝區：遠離 0.5% 才重置標記
     alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
@@ -476,16 +482,19 @@ if twii_cp and twii_mas:
             else: ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         
         state_key = f"twii_{ma_name}"
+        # 🚀 雙層邏輯：觸碰警戒就推播，但要退回安全距離才解鎖
         if abs(dist_pct) <= threshold:
             if not st.session_state.market_alert_flags.get(state_key, False):
                 if dist_pts > 0: msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
                 else: msg = f"📈 大盤現價 {twii_cp:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
                 alert_msgs.append(msg)
                 st.session_state.market_alert_flags[state_key] = True
-        else:
+        elif abs(dist_pct) > reset_threshold:
             st.session_state.market_alert_flags[state_key] = False
             
-    if alert_msgs:
+    # 🚀 台股休市靜音鎖：早上 8 點到下午 2:59 才會發送大盤推播
+    is_tw_market_open = (8 <= now_tpe.hour < 15)
+    if alert_msgs and is_tw_market_open:
         full_msg = "⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs)
         send_telegram_alert(full_msg)
     
@@ -579,7 +588,6 @@ with tab_tw:
             curr_p = live_cp if live_cp is not None else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             
-            # 🚀 真・即時日均線：強制將真實現價替換為今日收盤價計算
             df_daily_rt = df_daily.copy()
             if not df_daily_rt.empty:
                 df_daily_rt.iloc[-1, df_daily_rt.columns.get_loc('Close')] = curr_p
@@ -832,7 +840,6 @@ with tab_us:
         if live_cp is not None and not df_daily.empty:
             curr_p = live_cp
             
-            # 🚀 美股也實裝：真・即時日均線
             df_daily_rt = df_daily.copy()
             if not df_daily_rt.empty:
                 df_daily_rt.iloc[-1, df_daily_rt.columns.get_loc('Close')] = curr_p
