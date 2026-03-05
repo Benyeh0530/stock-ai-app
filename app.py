@@ -10,19 +10,17 @@ import re
 import time
 import os
 import numpy as np
-import altair as alt # 🚀 專業繪圖引擎
+import altair as alt
 
 # --- 基礎設定 ---
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 🎨 首席設計師的 CSS 視覺美化 (核彈級文字修復) ---
+# --- 🎨 首席設計師的 CSS 視覺美化 (深海神盾 + 核彈級文字修復) ---
 st.markdown("""
 <style>
-    /* 整體背景與間距微調 */
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     
-    /* 漸層科技感主標題 */
     h1 {
         background: -webkit-linear-gradient(45deg, #00f2fe, #4facfe);
         -webkit-background-clip: text;
@@ -31,9 +29,8 @@ st.markdown("""
         text-shadow: 0px 2px 4px rgba(0,0,0,0.1);
     }
 
-    /* 🚀 終極修復：暴力強制側邊欄所有文字變成純白高光 */
     section[data-testid="stSidebar"] {
-        background-color: #0f172a !important; /* 深海藍底色 */
+        background-color: #0f172a !important; 
         border-right: 1px solid #1e293b;
     }
     section[data-testid="stSidebar"] p,
@@ -48,7 +45,6 @@ st.markdown("""
         text-shadow: 0px 1px 2px rgba(0,0,0,0.8);
     }
 
-    /* 確保下拉選單與輸入框裡面的字不會變成白底白字 */
     section[data-testid="stSidebar"] div[data-baseweb="select"] span,
     section[data-testid="stSidebar"] div[data-baseweb="select"] li {
         color: #0f172a !important; 
@@ -63,7 +59,6 @@ st.markdown("""
         color: #64748b !important;
     }
     
-    /* 數據面板字體強化 */
     div[data-testid="stMetricValue"] {
         font-size: 1.9rem; font-weight: 700;
         font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -72,7 +67,6 @@ st.markdown("""
         font-weight: 600; color: #8b9bb4 !important; font-size: 0.95rem;
     }
 
-    /* 卡片與邊框圓角立體化 */
     div[data-testid="stVerticalBlock"] div[style*="border"] {
         border-radius: 12px !important; border: 1px solid #2d3748 !important;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
@@ -84,7 +78,6 @@ st.markdown("""
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
     }
 
-    /* 按鈕高質感漸層 */
     button[kind="primary"] {
         background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
         color: white !important; font-weight: 600; border: none; border-radius: 8px;
@@ -98,7 +91,6 @@ st.markdown("""
         box-shadow: 0 6px 8px rgba(37, 99, 235, 0.3);
     }
 
-    /* 摺疊面板美化 */
     div[data-testid="stExpander"] {
         border-radius: 8px !important; border: 1px solid #334155 !important;
         background-color: rgba(30, 41, 59, 0.5) !important;
@@ -184,7 +176,6 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與舊資料向下相容
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -377,7 +368,6 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-# 🚀 升級版：專業級 Altair 磁吸走勢圖 (完全消滅死魚線)
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     if df_1m.empty: return
     
@@ -387,24 +377,22 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     chart_df.rename(columns={'Close': '現價'}, inplace=True)
     
     color_domain = ['現價']
-    color_range = ['#3b82f6'] # 藍色現價
+    color_range = ['#3b82f6']
 
     if 'VWAP' in df_1m.columns:
-        # 🚀 防呆機制：將 VWAP 剛開盤時可能出現的 0 替換為現價，避免 Y 軸被極度壓縮
         vwap_clean = df_1m['VWAP'].replace(0, np.nan).bfill().fillna(df_1m['Close'])
         chart_df['當日VWAP(均線)'] = vwap_clean
         color_domain.append('當日VWAP(均線)')
-        color_range.append('#f59e0b') # 橘黃色主力成本線
+        color_range.append('#f59e0b')
 
     if cdp_nh > 0 and cdp_nl > 0:
         chart_df['CDP_NH(壓力)'] = cdp_nh
         chart_df['CDP_NL(支撐)'] = cdp_nl
         color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)'])
-        color_range.extend(['#ef4444', '#10b981']) # 紅色壓力，綠色支撐
+        color_range.extend(['#ef4444', '#10b981'])
     
     df_melted = chart_df.melt('Time', var_name='線型', value_name='價格')
     
-    # 🚀 動態精準計算 Y 軸上下限 (過濾異常 0 值，上下各留 0.5% 緩衝空間)
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
     if not valid_prices.empty:
         y_min = valid_prices.min() * 0.995
@@ -412,7 +400,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     else:
         y_min, y_max = 0, 100
 
-    # 建立多線圖基礎
     base = alt.Chart(df_melted).encode(x=alt.X('Time:T', title='', axis=alt.Axis(format='%H:%M', grid=False, tickCount=10)))
     
     line = base.mark_line(strokeWidth=2.5).encode(
@@ -420,16 +407,13 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
         color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0))
     )
 
-    # 🚀 磁吸互動層 (Hover)：建立隱形的十字準星
     hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
 
-    # 滑鼠靠近時浮現圓點並顯示 Tooltip
     points = line.mark_circle(size=80).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0)),
         tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]
     ).add_params(hover)
 
-    # 垂直虛線
     rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
@@ -582,7 +566,6 @@ with tab_tw:
         
         cdp_nh = cdp_nl = 0.0
         if not df_1m.empty and not df_daily.empty:
-            # 🚀 精算當日 VWAP，解決除以零產生的 nan
             df_1m['Typical_Price'] = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
             df_1m['Cum_Vol'] = df_1m['Volume'].cumsum().replace(0, np.nan)
             df_1m['Cum_PV'] = (df_1m['Typical_Price'] * df_1m['Volume']).cumsum()
@@ -595,6 +578,16 @@ with tab_tw:
             
             curr_p = live_cp if live_cp is not None else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
+            
+            # 🚀 真・即時日均線：強制將真實現價替換為今日收盤價計算
+            df_daily_rt = df_daily.copy()
+            if not df_daily_rt.empty:
+                df_daily_rt.iloc[-1, df_daily_rt.columns.get_loc('Close')] = curr_p
+                mas['日線3MA'] = df_daily_rt['Close'].tail(3).mean()
+                mas['日線5MA'] = df_daily_rt['Close'].tail(5).mean()
+                mas['日線10MA'] = df_daily_rt['Close'].tail(10).mean()
+                mas['日線23MA'] = df_daily_rt['Close'].tail(23).mean()
+                mas['日線90MA'] = df_daily_rt['Close'].tail(90).mean()
             
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
@@ -705,13 +698,13 @@ with tab_tw:
                 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
+                    st.caption(f"📅 **真・即時長均線** | 日線: 3MA(`{mas.get('日線3MA',0):.2f}`) 5MA(`{mas.get('日線5MA',0):.2f}`) 10MA(`{mas.get('日線10MA',0):.2f}`) 23MA(`{mas.get('日線23MA',0):.2f}`) 90MA(`{mas.get('日線90MA',0):.2f}`)")
 
-                # 🚀 專業級磁吸動態微縮走勢圖 (內含 VWAP 橘色主力均線)
                 render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
-                    opts = ["固定價格", "當日VWAP", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
+                    opts = ["固定價格", "當日VWAP", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "日線3MA", "日線5MA", "日線10MA", "日線23MA", "日線90MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                     current_type = al.get('type', "固定價格")
                     if current_type not in opts: current_type = "固定價格"
                     
@@ -839,6 +832,16 @@ with tab_us:
         if live_cp is not None and not df_daily.empty:
             curr_p = live_cp
             
+            # 🚀 美股也實裝：真・即時日均線
+            df_daily_rt = df_daily.copy()
+            if not df_daily_rt.empty:
+                df_daily_rt.iloc[-1, df_daily_rt.columns.get_loc('Close')] = curr_p
+                mas['日線3MA'] = df_daily_rt['Close'].tail(3).mean()
+                mas['日線5MA'] = df_daily_rt['Close'].tail(5).mean()
+                mas['日線10MA'] = df_daily_rt['Close'].tail(10).mean()
+                mas['日線23MA'] = df_daily_rt['Close'].tail(23).mean()
+                mas['日線90MA'] = df_daily_rt['Close'].tail(90).mean()
+            
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
                 y_high = df_daily['High'].iloc[-2]
@@ -916,12 +919,13 @@ with tab_us:
                 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
+                    st.caption(f"📅 **真・即時長均線** | 日線: 3MA(`{mas.get('日線3MA',0):.2f}`) 5MA(`{mas.get('日線5MA',0):.2f}`) 10MA(`{mas.get('日線10MA',0):.2f}`) 23MA(`{mas.get('日線23MA',0):.2f}`) 90MA(`{mas.get('日線90MA',0):.2f}`)")
 
                 render_mini_chart(df_1m_us, cdp_nh, cdp_nl, is_us=True)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
-                    opts = ["固定價格", "當日VWAP", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
+                    opts = ["固定價格", "當日VWAP", "5K3MA", "5K5MA", "5K20MA", "15K3MA", "15K5MA", "15K20MA", "日線3MA", "日線5MA", "日線10MA", "日線23MA", "日線90MA", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                     current_type = al.get('type', "固定價格")
                     if current_type not in opts: current_type = "固定價格"
                     
