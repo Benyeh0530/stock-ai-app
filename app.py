@@ -115,6 +115,35 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
+# --- 🚀 新增：當沖損益計算引擎 (1.8折 / 當沖稅 0.15%) ---
+def calc_tw_pnl(entry_price, current_price, lots, direction="作多"):
+    shares = lots * 1000
+    fee_rate = 0.001425 * 0.18
+    tax_rate = 0.0015
+    
+    if direction == "作多":
+        buy_val = entry_price * shares
+        buy_fee = int(buy_val * fee_rate)
+        buy_cost = buy_val + buy_fee
+        
+        sell_val = current_price * shares
+        sell_fee = int(sell_val * fee_rate)
+        sell_tax = int(sell_val * tax_rate)
+        sell_net = sell_val - sell_fee - sell_tax
+        
+        return sell_net - buy_cost
+    else: # 作空
+        sell_val = entry_price * shares
+        sell_fee = int(sell_val * fee_rate)
+        sell_tax = int(sell_val * tax_rate)
+        sell_net = sell_val - sell_fee - sell_tax
+        
+        buy_val = current_price * shares
+        buy_fee = int(buy_val * fee_rate)
+        buy_cost = buy_val + buy_fee
+        
+        return sell_net - buy_cost
+
 # --- 💾 永久記憶資料庫 ---
 DATA_FILE = "watchlist_data.json"
 
@@ -142,7 +171,8 @@ def cb_add_tw(code, name, target_price=0.0, condition=">="):
         st.session_state.tw_stocks.append({
             "code": code, "name": name, 
             "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
-            "ai_advice": "", "vol_alert_triggered": False
+            "ai_advice": "", "vol_alert_triggered": False,
+            "my_price": 0.0, "my_lots": 1, "my_dir": "作多" # 新增持倉記憶
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -157,7 +187,8 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
         st.session_state.us_stocks.append({
             "code": code, "name": name, 
             "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
-            "ai_advice": ""
+            "ai_advice": "",
+            "my_price": 0.0, "my_shares": 10, "my_dir": "作多" # 新增持倉記憶
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -176,13 +207,16 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化與向下相容
+# 初始化與舊資料向下相容
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
     us_data = data.get("us", [])
     
     for s in tw_data:
+        if 'my_price' not in s: s['my_price'] = 0.0
+        if 'my_lots' not in s: s['my_lots'] = 1
+        if 'my_dir' not in s: s['my_dir'] = "作多"
         if 'alerts' not in s:
             s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
@@ -190,6 +224,9 @@ if 'initialized' not in st.session_state:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
                 if 'type' not in al: al['type'] = "固定價格"
     for s in us_data:
+        if 'my_price' not in s: s['my_price'] = 0.0
+        if 'my_shares' not in s: s['my_shares'] = 10
+        if 'my_dir' not in s: s['my_dir'] = "作多"
         if 'alerts' not in s:
             s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
@@ -455,9 +492,6 @@ with col_t3:
 
 st.divider()
 
-# ==========================================
-# 🚀 修復：大盤雷達加入避震緩衝區 (Hysteresis) 與時間鎖防洗版
-# ==========================================
 twii_mas = get_index_mas('^TWII')
 twii_cp = live_price_dict.get('^TWII', (None, None))[0]
 if twii_cp is None and '台股加權' in market_temp:
@@ -467,7 +501,7 @@ if twii_cp and twii_mas:
     st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
     ma_cols = st.columns(4)
     threshold = 0.003
-    reset_threshold = 0.005 # 🚀 避震緩衝區：遠離 0.5% 才重置標記
+    reset_threshold = 0.005 
     alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
@@ -482,7 +516,6 @@ if twii_cp and twii_mas:
             else: ma_cols[idx].error(f"**{ma_name}** `{ma_val:.0f}`\n\n⚔️ **上檔壓力**：距突破還差 **{abs(dist_pts):.0f}** 點 ({dist_pct*100:+.2f}%)")
         
         state_key = f"twii_{ma_name}"
-        # 🚀 雙層邏輯：觸碰警戒就推播，但要退回安全距離才解鎖
         if abs(dist_pct) <= threshold:
             if not st.session_state.market_alert_flags.get(state_key, False):
                 if dist_pts > 0: msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
@@ -492,7 +525,6 @@ if twii_cp and twii_mas:
         elif abs(dist_pct) > reset_threshold:
             st.session_state.market_alert_flags[state_key] = False
             
-    # 🚀 台股休市靜音鎖：早上 8 點到下午 2:59 才會發送大盤推播
     is_tw_market_open = (8 <= now_tpe.hour < 15)
     if alert_msgs and is_tw_market_open:
         full_msg = "⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs)
@@ -703,7 +735,32 @@ with tab_tw:
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
+
+                # 🚀 損益試算專區
+                st.markdown("##### 💰 當沖損益即時試算 (1.8折/當沖稅0.15%)")
+                c_pos1, c_pos2, c_pos3, c_pnl = st.columns([1.2, 1.5, 1, 2])
+                with c_pos1:
+                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}", label_visibility="collapsed")
+                with c_pos2:
+                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=0.5, key=f"my_p_tw_{code}")
+                with c_pos3:
+                    new_lots = st.number_input("張數", value=int(stock.get('my_lots', 1)), min_value=1, step=1, key=f"my_l_tw_{code}")
+                with c_pnl:
+                    if new_price > 0:
+                        pnl = calc_tw_pnl(new_price, curr_p, new_lots, new_dir)
+                        pnl_color = "normal" if pnl > 0 else "inverse"
+                        cost_base = new_price * new_lots * 1000
+                        pct_ret = (pnl / cost_base) * 100 if cost_base > 0 else 0
+                        st.metric("未實現損益 (淨利)", f"{pnl:,.0f} 元", f"{pct_ret:+.2f}%", delta_color=pnl_color)
                 
+                # 若持倉改變，自動存檔
+                if new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_lots != stock.get('my_lots'):
+                    st.session_state.tw_stocks[idx]['my_dir'] = new_dir
+                    st.session_state.tw_stocks[idx]['my_price'] = new_price
+                    st.session_state.tw_stocks[idx]['my_lots'] = new_lots
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    st.rerun()
+
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
                     st.caption(f"📅 **真・即時長均線** | 日線: 3MA(`{mas.get('日線3MA',0):.2f}`) 5MA(`{mas.get('日線5MA',0):.2f}`) 10MA(`{mas.get('日線10MA',0):.2f}`) 23MA(`{mas.get('日線23MA',0):.2f}`) 90MA(`{mas.get('日線90MA',0):.2f}`)")
@@ -923,6 +980,30 @@ with tab_us:
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.success(ai_advice)
+
+                # 🚀 美股損益試算 (無手續費版)
+                st.markdown("##### 💰 美股持倉即時試算")
+                c_pos1, c_pos2, c_pos3, c_pnl = st.columns([1.2, 1.5, 1, 2])
+                with c_pos1:
+                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_us_{code}", label_visibility="collapsed")
+                with c_pos2:
+                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=1.0, key=f"my_p_us_{code}")
+                with c_pos3:
+                    new_shares = st.number_input("股數", value=int(stock.get('my_shares', 10)), min_value=1, step=1, key=f"my_l_us_{code}")
+                with c_pnl:
+                    if new_price > 0:
+                        if new_dir == "作多": pnl = (curr_p - new_price) * new_shares
+                        else: pnl = (new_price - curr_p) * new_shares
+                        pnl_color = "normal" if pnl > 0 else "inverse"
+                        pct_ret = (pnl / (new_price * new_shares)) * 100 if new_price > 0 else 0
+                        st.metric("未實現損益", f"${pnl:,.2f}", f"{pct_ret:+.2f}%", delta_color=pnl_color)
+                
+                if new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_shares != stock.get('my_shares'):
+                    st.session_state.us_stocks[idx]['my_dir'] = new_dir
+                    st.session_state.us_stocks[idx]['my_price'] = new_price
+                    st.session_state.us_stocks[idx]['my_shares'] = new_shares
+                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                    st.rerun()
                 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
