@@ -115,11 +115,12 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 🚀 當沖損益計算引擎 ---
-def calc_tw_pnl(entry_price, current_price, lots, direction="作多"):
+# --- 🚀 升級版：支援當沖/留倉雙模稅率的損益引擎 ---
+def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000
     fee_rate = 0.001425 * 0.18
-    tax_rate = 0.0015
+    # 💡 判斷稅率：當沖 0.15%，留倉 0.3%
+    tax_rate = 0.0015 if trade_type == "當沖" else 0.003
     
     if direction == "作多":
         buy_val = entry_price * shares
@@ -172,7 +173,7 @@ def cb_add_tw(code, name, target_price=0.0, condition=">="):
             "code": code, "name": name, 
             "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
             "ai_advice": "", "vol_alert_triggered": False,
-            "my_price": 0.0, "my_lots": 1, "my_dir": "作多" 
+            "my_trade_type": "當沖", "my_price": 0.0, "my_lots": 1, "my_dir": "作多" 
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -214,6 +215,7 @@ if 'initialized' not in st.session_state:
     us_data = data.get("us", [])
     
     for s in tw_data:
+        if 'my_trade_type' not in s: s['my_trade_type'] = "當沖" # 升級舊資料屬性
         if 'my_price' not in s: s['my_price'] = 0.0
         if 'my_lots' not in s: s['my_lots'] = 1
         if 'my_dir' not in s: s['my_dir'] = "作多"
@@ -481,7 +483,7 @@ now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
 t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 
-# 🚀 營業時間鎖：精準鎖定台灣時間 09:00 ~ 13:30 (用於控制推播)
+# 🚀 營業時間鎖
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
 col_t1, col_t2, col_t3 = st.columns(3)
@@ -528,7 +530,6 @@ if twii_cp and twii_mas:
         elif abs(dist_pct) > reset_threshold:
             st.session_state.market_alert_flags[state_key] = False
             
-    # 🚀 大盤套用營業時間鎖，只在 09:00 - 13:30 內推播防洗版
     if alert_msgs and is_tw_market_open:
         full_msg = "⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs)
         send_telegram_alert(full_msg)
@@ -667,7 +668,6 @@ with tab_tw:
                         vol_alert_msg += "🔥 15K波段爆量！"
                         is_vol_surge = True
 
-            # 🚀 爆量推播套用營業時間鎖
             if is_vol_surge:
                 if not stock.get('vol_alert_triggered', False):
                     if is_tw_market_open:
@@ -716,7 +716,6 @@ with tab_tw:
                             if curr_p <= t_p: touches = max(touches, 1)
 
                         if touches >= 2 and not al.get('touch_2_triggered', False):
-                            # 🚀 雙重叩關推播套用營業時間鎖
                             if is_tw_market_open:
                                 send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘內已測試目標 {t_p_label} 達 {touches} 次！\n方向：{'漲破' if cond=='>=' else '跌破'}\n現價：{curr_p}\n突破機率大增，請密切留意！{tg_vol_str}")
                             st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
@@ -729,7 +728,6 @@ with tab_tw:
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
             
-            # 🚀 一般到價推播套用營業時間鎖
             if triggered_msgs and is_tw_market_open:
                 msg_joined = "、".join(triggered_msgs)
                 send_telegram_alert(f"🚨【台股多重到價】\n{name}({code}) 已觸發：{msg_joined}！\n現價：{curr_p}\n{tg_vol_str}")
@@ -744,23 +742,28 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
 
-                st.markdown("##### 💰 當沖損益即時試算 (1.8折/當沖稅0.15%)")
-                c_pos1, c_pos2, c_pos3, c_pnl = st.columns([1.2, 1.5, 1, 2])
+                # 🚀 升級版：當沖/留倉 雙模損益試算
+                st.markdown("##### 💰 持倉損益即時試算 (1.8折)")
+                c_pos1, c_pos2, c_pos3, c_pos4, c_pnl = st.columns([1, 1, 1.2, 0.8, 2])
                 with c_pos1:
-                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}", label_visibility="collapsed")
+                    new_trade_type = st.selectbox("類型", ["當沖", "留倉"], index=0 if stock.get('my_trade_type', '當沖') == "當沖" else 1, key=f"tt_tw_{code}", label_visibility="collapsed")
                 with c_pos2:
-                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=0.5, key=f"my_p_tw_{code}")
+                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}", label_visibility="collapsed")
                 with c_pos3:
+                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=0.5, key=f"my_p_tw_{code}")
+                with c_pos4:
                     new_lots = st.number_input("張數", value=int(stock.get('my_lots', 1)), min_value=1, step=1, key=f"my_l_tw_{code}")
                 with c_pnl:
                     if new_price > 0:
-                        pnl = calc_tw_pnl(new_price, curr_p, new_lots, new_dir)
+                        pnl = calc_tw_pnl(new_price, curr_p, new_lots, new_dir, new_trade_type)
                         pnl_color = "normal" if pnl > 0 else "inverse"
                         cost_base = new_price * new_lots * 1000
                         pct_ret = (pnl / cost_base) * 100 if cost_base > 0 else 0
-                        st.metric("未實現損益 (淨利)", f"{pnl:,.0f} 元", f"{pct_ret:+.2f}%", delta_color=pnl_color)
+                        st.metric("未實現淨利", f"{pnl:,.0f} 元", f"{pct_ret:+.2f}%", delta_color=pnl_color)
                 
-                if new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_lots != stock.get('my_lots'):
+                # 自動存檔記憶持倉狀態
+                if new_trade_type != stock.get('my_trade_type') or new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_lots != stock.get('my_lots'):
+                    st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type
                     st.session_state.tw_stocks[idx]['my_dir'] = new_dir
                     st.session_state.tw_stocks[idx]['my_price'] = new_price
                     st.session_state.tw_stocks[idx]['my_lots'] = new_lots
@@ -975,7 +978,6 @@ with tab_us:
                         st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
                         st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
 
-            # 美股為夜間市場，不受台股營業時間鎖限制
             if triggered_msgs:
                 msg_joined = "、".join(triggered_msgs)
                 send_telegram_alert(f"🦅 🚨【美股多重到價】\n{code} 已觸發：{msg_joined}！\n現價：${curr_p}")
