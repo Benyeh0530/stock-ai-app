@@ -424,7 +424,7 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-# 🚀 左側：十字狙擊走勢圖 (封印滾輪、固定時間軸、綁定警示線)
+# 🚀 左側：十字狙擊走勢圖 (封印滾輪、固定當天時間軸、綁定警示線)
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     
@@ -503,7 +503,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-# 🚀 右側：動態 K 線圖 (時間軸鎖定 + 同步警示線)
+# 🚀 右側：無縫動態 K 線圖 (去除假日與盤後空白 + 同步警示線)
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -514,6 +514,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     df_chart = df.copy()
     
+    # 讓最新一根 K 棒吃進即時報價
     if curr_p is not None and not df_chart.empty:
         last_idx = df_chart.index[-1]
         df_chart.at[last_idx, 'Close'] = curr_p
@@ -529,33 +530,27 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     df_chart['Time'] = df_chart.index.tz_convert(tz_str)
     
     df_chart = df_chart.tail(60) 
-    
     if df_chart.empty: return
     
+    # 🚀 無縫接軌核心：將時間轉為字串並設定為 Ordinal (順序) 類別，自然消滅所有假假日與盤後空白
+    if tf == "日K":
+        df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%m/%d')
+    else:
+        df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%m/%d %H:%M')
+        
     y_min = df_chart['Low'].min() * 0.995
     y_max = df_chart['High'].max() * 1.005
     
     up_color = "#10b981" if is_us else "#ef4444"
     down_color = "#ef4444" if is_us else "#10b981"
     
-    # 🚀 K線圖的時間軸鎖定邏輯 (僅針對當沖時區)
-    if tf != "日K":
-        latest_time = df_chart['Time'].iloc[-1]
-        if is_us:
-            start_time = latest_time.replace(hour=9, minute=30, second=0, microsecond=0).isoformat()
-            end_time = latest_time.replace(hour=16, minute=0, second=0, microsecond=0).isoformat()
-        else:
-            start_time = latest_time.replace(hour=9, minute=0, second=0, microsecond=0).isoformat()
-            end_time = latest_time.replace(hour=13, minute=30, second=0, microsecond=0).isoformat()
-        
-        base = alt.Chart(df_chart).encode(
-            x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time, end_time]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=5))
-        )
-    else:
-        # 日K不需要鎖定盤中時間，讓 Altair 自動調整
-        base = alt.Chart(df_chart).encode(
-            x=alt.X('Time:T', title='', axis=alt.Axis(format='%m/%d', grid=False, tickCount=5))
-        )
+    # 🚀 採用 O (Ordinal) 軸，完美貼合每一根 K 棒
+    base = alt.Chart(df_chart).encode(
+        x=alt.X('TimeStr:O', 
+                sort=alt.SortField(field='Time', order='ascending'), 
+                title='', 
+                axis=alt.Axis(labelAngle=-45, labelOverlap=True))
+    )
     
     rule = base.mark_rule().encode(
         y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
@@ -567,7 +562,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         y='Open:Q',
         y2='Close:Q',
         color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-        tooltip=[alt.Tooltip('Time:T', title='時間', format='%Y-%m-%d %H:%M'), 'Open', 'High', 'Low', 'Close']
+        tooltip=[alt.Tooltip('TimeStr:N', title='時間'), 'Open', 'High', 'Low', 'Close']
     )
     
     layers = [rule, bar]
@@ -580,7 +575,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             )
             layers.append(ma_line)
             
-    # 🚀 同步將「固定價格」警示實體化為 K 線圖上的黃色戰術虛線
+    # 🚀 同步顯示「固定價格」警示防線
     for al in alerts:
         if al.get('type') == '固定價格' and al.get('price', 0) > 0:
             alert_price = al['price']
@@ -890,6 +885,7 @@ with tab_tw:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
 
+                # 🚀 左右雙開：走勢圖 vs K線圖
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
