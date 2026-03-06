@@ -56,7 +56,6 @@ st.markdown("""
         text-shadow: none !important;
     }
     
-    /* 縮小 Metric 字體，讓頂部儀表板能完美塞下多個數據 */
     div[data-testid="stMetricValue"] {
         font-size: 1.5rem; font-weight: 700;
         font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -402,12 +401,11 @@ def fetch_ai_list(report_type):
         return None
     except: return None
 
-# 🚀 防毒化與防呆聯動股引擎
+# 🚀 聯動股修復：延長超時、嚴格要求純數字，避免冷門股抓不到
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
-    # 強制要求純代碼，解決冷門股被忽略的問題
     rule_str = "請絕對只回傳股票代碼(如:2330, 2303, 5347)" if not is_us else "請絕對只回傳股票代碼(如:NVDA, AMD, TSM)"
     try:
         prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動的股票。嚴格規定：只能輸出代碼，不要任何中文。{rule_str}。"
@@ -422,12 +420,12 @@ def get_correlated_stocks(code, name, is_us=False):
         for c in codes:
             if c not in seen and c != code:
                 seen.add(c); uniq.append(c)
-        if not uniq: return None # 如果抓不到，回傳 None 讓主程式清除快取重試
+        if not uniq: return None # 抓不到就回傳 None，觸發強制清除快取重試
         return uniq[:3]
     except: 
         return None
 
-# 🚀 左側：十字狙擊走勢圖 (封印滾輪、固定當天時間軸、綁定警示線)
+# 🚀 左側：十字狙擊走勢圖
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     
@@ -506,7 +504,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-# 🚀 右側：無縫動態 K 線圖 (支援圖層自由隱藏防報錯 + 同步警示線)
+# 🚀 右側：無縫鷹眼 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -614,7 +612,6 @@ now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
 t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 
-# 🚀 營業時間鎖
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
 col_t1, col_t2, col_t3 = st.columns(3)
@@ -856,7 +853,7 @@ with tab_tw:
                 send_telegram_alert(f"🚨【台股多重到價】\n{name}({code}) 已觸發：{msg_joined}！\n現價：{curr_p}\n{tg_vol_str}")
 
             with st.container(border=True):
-                # 🚀 排版極致優化：首列戰情儀表板 (Title + 報價 + 損益 + 支撐壓力)
+                # 🚀 排版極致優化：首列戰情儀表板置頂
                 my_p = float(stock.get('my_price', 0.0))
                 my_l = int(stock.get('my_lots', 1))
                 my_dir = stock.get('my_dir', '作多')
@@ -870,7 +867,6 @@ with tab_tw:
 
                 with c_title: 
                     st.markdown(f"#### {name}({code})")
-                    if ai_advice: st.markdown(f"<span style='color:#10b981;font-size:0.85rem;'>{ai_advice}</span>", unsafe_allow_html=True)
                 
                 with c_p: 
                     st.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
@@ -889,6 +885,43 @@ with tab_tw:
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
+
+                # 🚀 聯動股霸氣置頂 (緊貼名稱下方)
+                if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
+                
+                corr_codes = get_correlated_stocks(code, name, is_us=False)
+                if not corr_codes:
+                    get_correlated_stocks.clear(code, name, is_us=False)
+                    st.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，AI 重新鎖定中...</div>", unsafe_allow_html=True)
+                else:
+                    corr_display = []
+                    for i, c in enumerate(corr_codes):
+                        c_name = all_stocks.get(c, c)
+                        icon = "👑" if i == 0 else "🔗"
+                        cp, pp = live_price_dict.get(c, (None, None))
+                        if cp is None: cp, pp = get_single_live_price(c, is_us=False)
+                        
+                        if cp is not None and pp is not None and pp > 0:
+                            diff = cp - pp
+                            pct = (diff / pp) * 100
+                            sign = "+" if diff > 0 else ""
+                            # 台股：紅漲綠跌
+                            color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
+                            corr_display.append(f"<b>{icon} {c_name}({c})</b> {cp:.2f} (<span style='color:{color}'>{sign}{diff:.2f}, {sign}{pct:.2f}%</span>)")
+                            
+                            if is_tw_market_open:
+                                for th in [3.0, 5.0, 7.0]:
+                                    if abs(pct) >= th:
+                                        state_key = f"corr_alert_{c}_{code}_{th}"
+                                        if not st.session_state.market_alert_flags.get(state_key, False):
+                                            dir_str = "向上狂飆" if pct > 0 else "向下急跌"
+                                            send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {name}({code}) 的高度聯動指標 {c_name}({c}) 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：{cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {name} 是否準備跟進！")
+                                            st.session_state.market_alert_flags[state_key] = True
+                        else:
+                            corr_display.append(f"<b>{icon} {c_name}({c})</b> 讀取中...")
+                    st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
+                
+                st.divider()
 
                 # 🚀 雙開圖表區域
                 c_chart1, c_chart2 = st.columns(2)
@@ -992,37 +1025,6 @@ with tab_tw:
                                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                         st.rerun()
                                 except: pass
-
-                # 🚀 聯動股置底 (修復快取消失 Bug)
-                corr_codes = get_correlated_stocks(code, name, is_us=False)
-                if not corr_codes:
-                    get_correlated_stocks.clear(code, name, is_us=False)
-                    st.caption("🔗 **高度聯動股狀態：** 網路擁塞，AI 重新鎖定中...")
-                else:
-                    corr_display = []
-                    for i, c in enumerate(corr_codes):
-                        c_name = all_stocks.get(c, c)
-                        icon = "👑" if i == 0 else "🔗"
-                        cp, pp = live_price_dict.get(c, (None, None))
-                        if cp is None: cp, pp = get_single_live_price(c, is_us=False)
-                        
-                        if cp is not None and pp is not None and pp > 0:
-                            diff = cp - pp
-                            pct = (diff / pp) * 100
-                            sign = "+" if diff > 0 else ""
-                            corr_display.append(f"**{icon} {c_name}({c})** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
-                            
-                            if is_tw_market_open:
-                                for th in [3.0, 5.0, 7.0]:
-                                    if abs(pct) >= th:
-                                        state_key = f"corr_alert_{c}_{code}_{th}"
-                                        if not st.session_state.market_alert_flags.get(state_key, False):
-                                            dir_str = "向上狂飆" if pct > 0 else "向下急跌"
-                                            send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {name}({code}) 的高度聯動指標 {c_name}({c}) 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：{cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {name} 是否準備跟進！")
-                                            st.session_state.market_alert_flags[state_key] = True
-                        else:
-                            corr_display.append(f"**{icon} {c_name}({c})** 讀取中...")
-                    st.markdown("🔗 **高度聯動股狀態：** " + " ｜ ".join(corr_display))
 
 # ====================
 # 戰區 2：美股波段戰情
@@ -1147,7 +1149,6 @@ with tab_us:
 
                 with c_title: 
                     st.markdown(f"#### 🦅 {code}")
-                    if ai_advice: st.markdown(f"<span style='color:#10b981;font-size:0.85rem;'>{ai_advice}</span>", unsafe_allow_html=True)
                 
                 with c_p: 
                     st.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
@@ -1165,6 +1166,41 @@ with tab_us:
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
 
+                # 🚀 聯動股霸氣置頂 (緊貼名稱下方)
+                if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
+
+                corr_codes = get_correlated_stocks(code, code, is_us=True)
+                if not corr_codes:
+                    get_correlated_stocks.clear(code, code, is_us=True)
+                    st.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，AI 重新鎖定中...</div>", unsafe_allow_html=True)
+                else:
+                    corr_display = []
+                    for i, c in enumerate(corr_codes):
+                        icon = "👑" if i == 0 else "🔗"
+                        cp, pp = live_price_dict.get(c, (None, None))
+                        if cp is None: cp, pp = get_single_live_price(c, is_us=True)
+                        
+                        if cp is not None and pp is not None and pp > 0:
+                            diff = cp - pp
+                            pct = (diff / pp) * 100
+                            sign = "+" if diff > 0 else ""
+                            # 美股：綠漲紅跌
+                            color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
+                            corr_display.append(f"<b>{icon} {c}</b> {cp:.2f} (<span style='color:{color};'>{sign}{diff:.2f}, {sign}{pct:.2f}%</span>)")
+                            
+                            for th in [3.0, 5.0, 7.0]:
+                                if abs(pct) >= th:
+                                    state_key = f"corr_alert_{c}_{code}_{th}"
+                                    if not st.session_state.market_alert_flags.get(state_key, False):
+                                        dir_str = "向上狂飆" if pct > 0 else "向下急跌"
+                                        send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {code} 的高度聯動指標 {c} 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：${cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {code} 是否準備跟進！")
+                                        st.session_state.market_alert_flags[state_key] = True
+                        else:
+                            corr_display.append(f"<b>{icon} {c}</b> 讀取中...")
+                    st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
+
+                st.divider()
+                
                 # 🚀 雙開圖表區域
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
@@ -1183,7 +1219,7 @@ with tab_us:
                 # 🚀 交易與警示設定：完美折疊收納
                 with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
                     st.markdown("##### 💰 美股持倉參數")
-                    c_pos1, c_pos2, c_pos3 = st.columns([1, 1.5, 1])
+                    c_pos1, c_pos2, c_pos3 = st.columns(3)
                     with c_pos1:
                         new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if my_dir_us == "作多" else 1, key=f"dir_us_{code}")
                     with c_pos2:
@@ -1264,35 +1300,6 @@ with tab_us:
                                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                                         st.rerun()
                                 except: pass
-
-                # 🚀 聯動股置底 (修復快取消失 Bug)
-                corr_codes = get_correlated_stocks(code, code, is_us=True)
-                if not corr_codes:
-                    get_correlated_stocks.clear(code, code, is_us=True)
-                    st.caption("🔗 **高度聯動股狀態：** 網路擁塞，AI 重新鎖定中...")
-                else:
-                    corr_display = []
-                    for i, c in enumerate(corr_codes):
-                        icon = "👑" if i == 0 else "🔗"
-                        cp, pp = live_price_dict.get(c, (None, None))
-                        if cp is None: cp, pp = get_single_live_price(c, is_us=True)
-                        
-                        if cp is not None and pp is not None and pp > 0:
-                            diff = cp - pp
-                            pct = (diff / pp) * 100
-                            sign = "+" if diff > 0 else ""
-                            corr_display.append(f"**{icon} {c}** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
-                            
-                            for th in [3.0, 5.0, 7.0]:
-                                if abs(pct) >= th:
-                                    state_key = f"corr_alert_{c}_{code}_{th}"
-                                    if not st.session_state.market_alert_flags.get(state_key, False):
-                                        dir_str = "向上狂飆" if pct > 0 else "向下急跌"
-                                        send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {code} 的高度聯動指標 {c} 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：${cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {code} 是否準備跟進！")
-                                        st.session_state.market_alert_flags[state_key] = True
-                        else:
-                            corr_display.append(f"**{icon} {c}** 讀取中...")
-                    st.markdown("🔗 **高度聯動股狀態：** " + " ｜ ".join(corr_display))
 
 # ====================
 # 戰區 3：10年核心資產
