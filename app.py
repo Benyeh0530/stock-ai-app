@@ -410,10 +410,11 @@ def get_correlated_stocks(code, name, is_us=False):
     market = "美股" if is_us else "台股"
     try:
         prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，不要任何中文或說明文字。"
+        # 稍微放寬 timeout 確保高連動股順利產生
         res = ai_model.generate_content(
             prompt, 
             generation_config=genai.types.GenerationConfig(temperature=0.0),
-            request_options={"timeout": 3.0}
+            request_options={"timeout": 8.0}
         ).text
         if is_us: codes = re.findall(r'[A-Z]+', res.upper())
         else: codes = re.findall(r'\d{4,}', res)
@@ -551,7 +552,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     layers = []
     
-    # 👁️ K棒圖層開關
     if "K棒" in visible_layers:
         rule = base.mark_rule().encode(
             y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
@@ -566,7 +566,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         )
         layers.extend([rule, bar])
     
-    # 👁️ 均線圖層開關 (採用純 Value 寫法，徹底根除 Schema 報錯)
     ma_colors = {'MA3': '#f59e0b', 'MA5': '#3b82f6', 'MA10': '#a855f7', 'MA23': '#ec4899'}
     for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
         if ma in visible_layers and ma in df_chart.columns:
@@ -577,7 +576,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             )
             layers.append(ma_line)
             
-    # 🚀 同步顯示「固定價格」警示防線
     for al in alerts:
         if al.get('type') == '固定價格' and al.get('price', 0) > 0:
             alert_price = al['price']
@@ -586,7 +584,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             ).encode(y='價格:Q')
             layers.append(alert_rule)
             
-    # 🛡️ 防呆機制：若使用者把所有圖層都隱藏了，畫一張優雅的空白畫布取代報錯
     if not layers:
         blank_df = pd.DataFrame({'x': [0], 'y': [0], 'text': ['👀 您已隱藏所有圖層']})
         blank = alt.Chart(blank_df).mark_text(size=18, color='#94a3b8').encode(text='text:N').properties(height=260)
@@ -906,7 +903,7 @@ with tab_tw:
                     with c_k2:
                         layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
                     
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (圖例: 黃MA3 藍MA5 紫MA10 粉MA23)")
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
                     render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
 
                 for a_idx, al in enumerate(alerts):
@@ -980,6 +977,7 @@ with tab_tw:
                 c2.metric("壓力(R1)", f"{r1:.2f}", help="當沖壓力算法：2*Pivot - 昨日最低價")
                 c3.metric("支撐(S1)", f"{s1:.2f}", help="當沖支撐算法：2*Pivot - 昨日最高價")
                 
+                # 🚀 聯動股發動雷達與資訊高亮 (台股)
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -993,10 +991,20 @@ with tab_tw:
                             diff = cp - pp
                             pct = (diff / pp) * 100
                             sign = "+" if diff > 0 else ""
-                            corr_display.append(f"{icon} {c_name}({c}) {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
+                            corr_display.append(f"**{icon} {c_name}({c})** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
+                            
+                            # 🚀 實裝聯動股飆車自動推播
+                            if is_tw_market_open:
+                                for th in [3.0, 5.0, 7.0]:
+                                    if abs(pct) >= th:
+                                        state_key = f"corr_alert_{c}_{code}_{th}"
+                                        if not st.session_state.market_alert_flags.get(state_key, False):
+                                            dir_str = "向上狂飆" if pct > 0 else "向下急跌"
+                                            send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {name}({code}) 的高度聯動指標 {c_name}({c}) 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：{cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {name} 是否準備跟進！")
+                                            st.session_state.market_alert_flags[state_key] = True
                         else:
-                            corr_display.append(f"{icon} {c_name}({c})")
-                    st.caption(" | ".join(corr_display))
+                            corr_display.append(f"**{icon} {c_name}({c})** 讀取中...")
+                    st.markdown("🔗 **高度聯動股狀態：** " + " ｜ ".join(corr_display))
 
 # ====================
 # 戰區 2：美股波段戰情
@@ -1053,8 +1061,8 @@ with tab_us:
                 cdp_nh = (2 * cdp) - y_low
                 cdp_nl = (2 * cdp) - y_high
                 mas['CDP(中價)'] = cdp
-                mas['CDP_NH(壓力)'] = cdp_nh
-                mas['CDP_NL(支撐)'] = cdp_nl
+                mas['CDP_NH(压力)'] = cdp_nh
+                mas['CDP_NL(支撑)'] = cdp_nl
             
             is_alert = False
             triggered_msgs = []
@@ -1150,7 +1158,7 @@ with tab_us:
                     with c_k2:
                         layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
                     
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (圖例: 黃MA3 藍MA5 紫MA10 粉MA23)")
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
                     render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
 
                 for a_idx, al in enumerate(alerts):
@@ -1224,6 +1232,7 @@ with tab_us:
                 c2.metric("壓力(R1)", f"${r1:.2f}", delta_color="off")
                 c3.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
                 
+                # 🚀 聯動股發動雷達與資訊高亮 (美股)
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
@@ -1236,10 +1245,19 @@ with tab_us:
                             diff = cp - pp
                             pct = (diff / pp) * 100
                             sign = "+" if diff > 0 else ""
-                            corr_display.append(f"{icon} {c} {cp:.2f} ({sign}{diff:.2f}, {sign}{pct:.2f}%)")
+                            corr_display.append(f"**{icon} {c}** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
+                            
+                            # 🚀 實裝聯動股飆車自動推播 (美股)
+                            for th in [3.0, 5.0, 7.0]:
+                                if abs(pct) >= th:
+                                    state_key = f"corr_alert_{c}_{code}_{th}"
+                                    if not st.session_state.market_alert_flags.get(state_key, False):
+                                        dir_str = "向上狂飆" if pct > 0 else "向下急跌"
+                                        send_telegram_alert(f"🔗 🚨【聯動族群發動】\n監控股 {code} 的高度聯動指標 {c} 開始動了！\n目前漲跌幅達 {sign}{pct:.2f}% ({dir_str})\n報價：${cp:.2f} (漲跌 {sign}{diff:.2f})\n請密切留意 {code} 是否準備跟進！")
+                                        st.session_state.market_alert_flags[state_key] = True
                         else:
-                            corr_display.append(f"{icon} {c}")
-                    st.caption(" | ".join(corr_display))
+                            corr_display.append(f"**{icon} {c}** 讀取中...")
+                    st.markdown("🔗 **高度聯動股狀態：** " + " ｜ ".join(corr_display))
 
 # ====================
 # 戰區 3：10年核心資產
