@@ -404,14 +404,12 @@ def fetch_ai_list(report_type):
         return None
     except: return None
 
-# 🚀 修復 Bug 1：強制 3 秒斷線防卡死，隱藏右上角擾人 Running 提示
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_correlated_stocks(code, name, is_us=False):
     if not API_KEY: return []
     market = "美股" if is_us else "台股"
     try:
         prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，不要任何中文或說明文字。"
-        # 加入 timeout 防堵 API 塞車
         res = ai_model.generate_content(
             prompt, 
             generation_config=genai.types.GenerationConfig(temperature=0.0),
@@ -505,8 +503,8 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-# 🚀 右側：動態切換 K 線圖 (含 MA3, MA5, MA10, MA23)
-def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, is_us=False):
+# 🚀 右側：動態 K 線圖 (時間軸鎖定 + 同步警示線)
+def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
     elif tf == "15K": df = df_15k
@@ -540,9 +538,24 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, is_us=False):
     up_color = "#10b981" if is_us else "#ef4444"
     down_color = "#ef4444" if is_us else "#10b981"
     
-    base = alt.Chart(df_chart).encode(
-        x=alt.X('Time:T', title='', axis=alt.Axis(format='%H:%M' if tf != '日K' else '%m/%d', grid=False, tickCount=5))
-    )
+    # 🚀 K線圖的時間軸鎖定邏輯 (僅針對當沖時區)
+    if tf != "日K":
+        latest_time = df_chart['Time'].iloc[-1]
+        if is_us:
+            start_time = latest_time.replace(hour=9, minute=30, second=0, microsecond=0).isoformat()
+            end_time = latest_time.replace(hour=16, minute=0, second=0, microsecond=0).isoformat()
+        else:
+            start_time = latest_time.replace(hour=9, minute=0, second=0, microsecond=0).isoformat()
+            end_time = latest_time.replace(hour=13, minute=30, second=0, microsecond=0).isoformat()
+        
+        base = alt.Chart(df_chart).encode(
+            x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time, end_time]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=5))
+        )
+    else:
+        # 日K不需要鎖定盤中時間，讓 Altair 自動調整
+        base = alt.Chart(df_chart).encode(
+            x=alt.X('Time:T', title='', axis=alt.Axis(format='%m/%d', grid=False, tickCount=5))
+        )
     
     rule = base.mark_rule().encode(
         y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
@@ -566,6 +579,15 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, is_us=False):
                 color=alt.value(colors[i])
             )
             layers.append(ma_line)
+            
+    # 🚀 同步將「固定價格」警示實體化為 K 線圖上的黃色戰術虛線
+    for al in alerts:
+        if al.get('type') == '固定價格' and al.get('price', 0) > 0:
+            alert_price = al['price']
+            alert_rule = alt.Chart(pd.DataFrame({'價格': [alert_price]})).mark_rule(
+                color='#eab308', strokeWidth=2, strokeDash=[4, 4]
+            ).encode(y='價格:Q')
+            layers.append(alert_rule)
         
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
@@ -868,7 +890,6 @@ with tab_tw:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
 
-                # 🚀 左右雙開：走勢圖 vs K線圖
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
@@ -876,10 +897,10 @@ with tab_tw:
                 
                 with c_chart2:
                     c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (黃:3 藍:5 紫:10 粉:23)")
+                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (含警示防線)")
                     with c_k2:
                         tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
-                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, is_us=False)
+                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
@@ -1118,10 +1139,10 @@ with tab_us:
                 
                 with c_chart2:
                     c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (黃:3 藍:5 紫:10 粉:23)")
+                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (含警示防線)")
                     with c_k2:
                         tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
-                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, is_us=True)
+                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
