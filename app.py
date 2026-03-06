@@ -387,7 +387,8 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
-@st.cache_data(ttl=43200)
+# 🚀 修復 Bug：加上 show_spinner=False，隱藏右上角的 Running 提示
+@st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type):
     if not API_KEY: return None
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
@@ -885,7 +886,6 @@ with tab_tw:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
 
-                # 🚀 左右雙開：走勢圖 vs K線圖
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
@@ -893,7 +893,7 @@ with tab_tw:
                 
                 with c_chart2:
                     c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (含警示防線)")
+                    with c_k1: st.caption("🕯️ **無縫動態 K 線與均線** (含警示防線)")
                     with c_k2:
                         tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
                     render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False)
@@ -1127,7 +1127,6 @@ with tab_us:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
                 
-                # 🚀 左右雙開佈局
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
@@ -1135,7 +1134,7 @@ with tab_us:
                 
                 with c_chart2:
                     c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **動態 K 線與多重均線** (含警示防線)")
+                    with c_k1: st.caption("🕯️ **無縫動態 K 線與均線** (含警示防線)")
                     with c_k2:
                         tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
                     render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True)
