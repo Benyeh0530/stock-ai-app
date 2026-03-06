@@ -387,7 +387,6 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
-# 🚀 修復 Bug：加上 show_spinner=False，隱藏右上角的 Running 提示
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type):
     if not API_KEY: return None
@@ -504,8 +503,8 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-# 🚀 右側：無縫動態 K 線圖 (去除假日與盤後空白 + 同步警示線)
-def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False):
+# 🚀 右側：支援「自由開關圖層」的鷹眼 K 線圖
+def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
     elif tf == "15K": df = df_15k
@@ -533,7 +532,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     df_chart = df_chart.tail(60) 
     if df_chart.empty: return
     
-    # 🚀 無縫接軌核心：將時間轉為字串並設定為 Ordinal (順序) 類別，自然消滅所有假假日與盤後空白
+    # 將時間轉為字串並設定為 Ordinal 類別，消滅所有假假日與盤後空白
     if tf == "日K":
         df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%m/%d')
     else:
@@ -545,7 +544,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     up_color = "#10b981" if is_us else "#ef4444"
     down_color = "#ef4444" if is_us else "#10b981"
     
-    # 🚀 採用 O (Ordinal) 軸，完美貼合每一根 K 棒
     base = alt.Chart(df_chart).encode(
         x=alt.X('TimeStr:O', 
                 sort=alt.SortField(field='Time', order='ascending'), 
@@ -553,26 +551,39 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
                 axis=alt.Axis(labelAngle=-45, labelOverlap=True))
     )
     
-    rule = base.mark_rule().encode(
-        y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
-        y2='High:Q',
-        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
-    )
+    layers = []
     
-    bar = base.mark_bar().encode(
-        y='Open:Q',
-        y2='Close:Q',
-        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-        tooltip=[alt.Tooltip('TimeStr:N', title='時間'), 'Open', 'High', 'Low', 'Close']
-    )
+    # 👁️ 若勾選顯示 K 棒，才繪製實體 K 線
+    if "K棒" in visible_layers:
+        rule = base.mark_rule().encode(
+            y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
+            y2='High:Q',
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
+        )
+        bar = base.mark_bar().encode(
+            y='Open:Q',
+            y2='Close:Q',
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
+            tooltip=[alt.Tooltip('TimeStr:N', title='時間'), 'Open', 'High', 'Low', 'Close']
+        )
+        layers.extend([rule, bar])
     
-    layers = [rule, bar]
-    colors = ['#f59e0b', '#3b82f6', '#a855f7', '#ec4899']
-    for i, ma in enumerate(['MA3', 'MA5', 'MA10', 'MA23']):
-        if ma in df_chart.columns:
+    # 👁️ 若勾選特定均線，才繪製並「自動生成頂部 Legend 圖例」
+    ma_colors = {'MA3': '#f59e0b', 'MA5': '#3b82f6', 'MA10': '#a855f7', 'MA23': '#ec4899'}
+    for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
+        if ma in visible_layers and ma in df_chart.columns:
             ma_line = base.mark_line(size=1.5, opacity=0.8).encode(
-                y=alt.Y(f'{ma}:Q'),
-                color=alt.value(colors[i])
+                y=alt.Y(f'{ma}:Q', scale=alt.Scale(domain=[y_min, y_max])),
+                color=alt.Color(
+                    datum=ma, 
+                    type='nominal',
+                    scale=alt.Scale(
+                        domain=['MA3', 'MA5', 'MA10', 'MA23'], 
+                        range=['#f59e0b', '#3b82f6', '#a855f7', '#ec4899']
+                    ),
+                    legend=alt.Legend(title=None, orient="top", padding=0)
+                ),
+                tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip(f'{ma}:Q', format='.2f', title=ma)]
             )
             layers.append(ma_line)
             
@@ -584,6 +595,9 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
                 color='#eab308', strokeWidth=2, strokeDash=[4, 4]
             ).encode(y='價格:Q')
             layers.append(alert_rule)
+            
+    if not layers: # 防呆：如果全部圖層都被隱藏，避免畫圖當機
+        layers.append(base.mark_text(text='👀 所有的圖層都被您隱藏囉').encode(y=alt.value(130)))
         
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
@@ -886,17 +900,21 @@ with tab_tw:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
 
+                # 🚀 左右雙開：極速走勢圖 vs 圖層可控鷹眼 K 線圖
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
                     render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
                 
                 with c_chart2:
-                    c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **無縫動態 K 線與均線** (含警示防線)")
+                    c_k1, c_k2 = st.columns([1, 2])
+                    with c_k1:
+                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
                     with c_k2:
-                        tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
-                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False)
+                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
+                    
+                    st.caption(f"🕯️ **{tf_sel} 無縫動態圖表** (支援圖層自由開關)")
+                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
@@ -1133,11 +1151,14 @@ with tab_us:
                     render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
                 
                 with c_chart2:
-                    c_k1, c_k2 = st.columns([3, 1])
-                    with c_k1: st.caption("🕯️ **無縫動態 K 線與均線** (含警示防線)")
+                    c_k1, c_k2 = st.columns([1, 2])
+                    with c_k1:
+                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
                     with c_k2:
-                        tf_sel = st.selectbox("時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
-                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True)
+                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
+                    
+                    st.caption(f"🕯️ **{tf_sel} 無縫動態圖表** (支援圖層自由開關)")
+                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
