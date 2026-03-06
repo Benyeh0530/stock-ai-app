@@ -11,7 +11,6 @@ import time
 import os
 import numpy as np
 import altair as alt
-import pyotp
 
 # --- 基礎設定 ---
 st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial_sidebar_state="expanded")
@@ -116,7 +115,7 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 🚀 升級版：券商級當沖/留倉損益計算引擎 ---
+# --- 🚀 券商級當沖/留倉損益計算引擎 ---
 def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000
     discount = 0.18
@@ -544,31 +543,19 @@ if twii_cp and twii_mas:
     st.divider()
 
 # ==========================================
-# 🛡️ 側邊欄：獨立的特權解鎖區塊 (Open Door, Locked Drawers)
+# 🛡️ 側邊欄：獨立的特權解鎖區塊 (移除 2FA，保留純密碼)
 # ==========================================
 with st.sidebar:
     st.header("🔐 核心權限解鎖")
     if not st.session_state.get("authenticated", False):
         pwd = st.text_input("🔑 系統金鑰", type="password")
-        totp_code = st.text_input("📱 2FA 驗證碼 (設定TOTP後填寫)", type="password", max_chars=6)
         if st.button("解鎖交易與損益區塊", use_container_width=True):
             correct_pwd = st.secrets.get("WEB_PASSWORD", "888888")
-            totp_secret = st.secrets.get("TOTP_SECRET", "")
-            
-            pwd_valid = (pwd == correct_pwd)
-            totp_valid = True
-            
-            if totp_secret and totp_code:
-                totp = pyotp.TOTP(totp_secret)
-                totp_valid = totp.verify(totp_code)
-            elif totp_secret and not totp_code:
-                totp_valid = False 
-                
-            if pwd_valid and totp_valid:
+            if pwd == correct_pwd:
                 st.session_state["authenticated"] = True
                 st.rerun()
             else:
-                st.error("🚫 授權拒絕：金鑰或驗證碼錯誤")
+                st.error("🚫 授權拒絕：金鑰錯誤")
     else:
         st.success("🟢 交易與損益權限已啟用")
         if st.button("🔒 鎖定系統", use_container_width=True):
@@ -810,7 +797,7 @@ with tab_tw:
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 else:
-                    st.info("🔒 請至左側邊欄解鎖，以檢視即時持倉損益。")
+                    st.info("🔒 請至左側邊欄輸入金鑰解鎖，以檢視即時持倉損益。")
 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
@@ -1057,7 +1044,7 @@ with tab_us:
                         save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                         st.rerun()
                 else:
-                    st.info("🔒 請至左側邊欄解鎖，以檢視即時持倉損益。")
+                    st.info("🔒 請至左側邊欄輸入金鑰解鎖，以檢視即時持倉損益。")
                 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
