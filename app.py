@@ -410,11 +410,10 @@ def get_correlated_stocks(code, name, is_us=False):
     market = "美股" if is_us else "台股"
     try:
         prompt = f"針對 {market} {name}({code})，找出 3 檔同產業高連動股票。第一檔須為絕對龍頭。請絕對只回傳代碼，不要任何中文或說明文字。"
-        # 稍微放寬 timeout 確保高連動股順利產生
         res = ai_model.generate_content(
             prompt, 
             generation_config=genai.types.GenerationConfig(temperature=0.0),
-            request_options={"timeout": 8.0}
+            request_options={"timeout": 3.0}
         ).text
         if is_us: codes = re.findall(r'[A-Z]+', res.upper())
         else: codes = re.findall(r'\d{4,}', res)
@@ -865,12 +864,39 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
 
+                # 🚀 排版優化：現價與壓力支撐置頂
+                c1, c2, c3 = st.columns(3)
+                c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
+                c2.metric("壓力(R1)", f"{r1:.2f}", help="當沖壓力算法：2*Pivot - 昨日最低價")
+                c3.metric("支撐(S1)", f"{s1:.2f}", help="當沖支撐算法：2*Pivot - 昨日最高價")
+                
+                st.divider()
+
+                # 🚀 排版優化：圖表區域
+                c_chart1, c_chart2 = st.columns(2)
+                with c_chart1:
+                    st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
+                    render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
+                
+                with c_chart2:
+                    c_k1, c_k2 = st.columns([1, 2])
+                    with c_k1:
+                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
+                    with c_k2:
+                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
+                    
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
+                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
+
+                st.divider()
+
+                # 🚀 排版優化：持倉損益置於防線上方，並修復 Label 隱藏導致的不對齊
                 st.markdown("##### 💰 持倉損益即時試算 (1.8折券商級)")
                 c_pos1, c_pos2, c_pos3, c_pos4, c_pnl = st.columns([1, 1, 1.2, 0.8, 2])
                 with c_pos1:
-                    new_trade_type = st.selectbox("類型", ["當沖", "留倉"], index=0 if stock.get('my_trade_type', '當沖') == "當沖" else 1, key=f"tt_tw_{code}", label_visibility="collapsed")
+                    new_trade_type = st.selectbox("類型", ["當沖", "留倉"], index=0 if stock.get('my_trade_type', '當沖') == "當沖" else 1, key=f"tt_tw_{code}")
                 with c_pos2:
-                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}", label_visibility="collapsed")
+                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}")
                 with c_pos3:
                     new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=0.5, key=f"my_p_tw_{code}")
                 with c_pos4:
@@ -891,21 +917,10 @@ with tab_tw:
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
 
-                c_chart1, c_chart2 = st.columns(2)
-                with c_chart1:
-                    st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
-                    render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
-                
-                with c_chart2:
-                    c_k1, c_k2 = st.columns([1, 2])
-                    with c_k1:
-                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
-                    with c_k2:
-                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
-                    
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
-                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
+                st.divider()
 
+                # 🚀 專屬監控防線
+                st.markdown("##### 🎯 專屬監控防線")
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
                     opts = ["固定價格", "當日VWAP", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
@@ -972,12 +987,8 @@ with tab_tw:
                             except: pass
 
                 st.divider()
-                c1, c2, c3 = st.columns(3)
-                c1.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
-                c2.metric("壓力(R1)", f"{r1:.2f}", help="當沖壓力算法：2*Pivot - 昨日最低價")
-                c3.metric("支撐(S1)", f"{s1:.2f}", help="當沖支撐算法：2*Pivot - 昨日最高價")
                 
-                # 🚀 聯動股發動雷達與資訊高亮 (台股)
+                # 🚀 聯動股置底
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if corr_codes:
                     corr_display = []
@@ -993,7 +1004,6 @@ with tab_tw:
                             sign = "+" if diff > 0 else ""
                             corr_display.append(f"**{icon} {c_name}({c})** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
                             
-                            # 🚀 實裝聯動股飆車自動推播
                             if is_tw_market_open:
                                 for th in [3.0, 5.0, 7.0]:
                                     if abs(pct) >= th:
@@ -1061,8 +1071,8 @@ with tab_us:
                 cdp_nh = (2 * cdp) - y_low
                 cdp_nl = (2 * cdp) - y_high
                 mas['CDP(中價)'] = cdp
-                mas['CDP_NH(压力)'] = cdp_nh
-                mas['CDP_NL(支撑)'] = cdp_nl
+                mas['CDP_NH(壓力)'] = cdp_nh
+                mas['CDP_NL(支撐)'] = cdp_nl
             
             is_alert = False
             triggered_msgs = []
@@ -1123,10 +1133,37 @@ with tab_us:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.success(ai_advice)
 
+                # 🚀 排版優化：現價與壓力支撐置頂
+                c1, c2, c3 = st.columns(3)
+                c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
+                c2.metric("壓力(R1)", f"${r1:.2f}", delta_color="off")
+                c3.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
+                
+                st.divider()
+
+                # 🚀 排版優化：圖表區域
+                c_chart1, c_chart2 = st.columns(2)
+                with c_chart1:
+                    st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
+                    render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
+                
+                with c_chart2:
+                    c_k1, c_k2 = st.columns([1, 2])
+                    with c_k1:
+                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
+                    with c_k2:
+                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
+                    
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
+                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
+
+                st.divider()
+
+                # 🚀 排版優化：持倉損益置於防線上方，並修復 Label 隱藏導致的不對齊
                 st.markdown("##### 💰 美股持倉即時試算")
                 c_pos1, c_pos2, c_pos3, c_pnl = st.columns([1.2, 1.5, 1, 2])
                 with c_pos1:
-                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_us_{code}", label_visibility="collapsed")
+                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_us_{code}")
                 with c_pos2:
                     new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=1.0, key=f"my_p_us_{code}")
                 with c_pos3:
@@ -1145,22 +1182,11 @@ with tab_us:
                     st.session_state.us_stocks[idx]['my_shares'] = new_shares
                     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
                     st.rerun()
-                
-                c_chart1, c_chart2 = st.columns(2)
-                with c_chart1:
-                    st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
-                    render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
-                
-                with c_chart2:
-                    c_k1, c_k2 = st.columns([1, 2])
-                    with c_k1:
-                        tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
-                    with c_k2:
-                        layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
-                    
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
-                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
 
+                st.divider()
+
+                # 🚀 專屬監控防線
+                st.markdown("##### 🎯 專屬監控防線")
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
                     opts = ["固定價格", "當日VWAP", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
@@ -1227,12 +1253,8 @@ with tab_us:
                             except: pass
 
                 st.divider()
-                c1, c2, c3 = st.columns(3)
-                c1.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
-                c2.metric("壓力(R1)", f"${r1:.2f}", delta_color="off")
-                c3.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
                 
-                # 🚀 聯動股發動雷達與資訊高亮 (美股)
+                # 🚀 聯動股置底
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
                 if corr_codes:
                     corr_display = []
@@ -1247,7 +1269,6 @@ with tab_us:
                             sign = "+" if diff > 0 else ""
                             corr_display.append(f"**{icon} {c}** {cp:.2f} (`{sign}{diff:.2f}`, `{sign}{pct:.2f}%`)")
                             
-                            # 🚀 實裝聯動股飆車自動推播 (美股)
                             for th in [3.0, 5.0, 7.0]:
                                 if abs(pct) >= th:
                                     state_key = f"corr_alert_{c}_{code}_{th}"
