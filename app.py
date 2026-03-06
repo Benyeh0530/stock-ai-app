@@ -115,39 +115,6 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 🚀 升級版：券商級當沖/留倉損益計算引擎 ---
-def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
-    shares = lots * 1000
-    discount = 0.18
-    tax_rate = 0.0015 if trade_type == "當沖" else 0.003
-    
-    if direction == "作多":
-        buy_val = entry_price * shares
-        buy_fee_orig = int(buy_val * 0.001425 + 0.5)
-        buy_fee = max(1, int(buy_fee_orig * discount + 0.5))
-        buy_cost = buy_val + buy_fee
-        
-        sell_val = current_price * shares
-        sell_fee_orig = int(sell_val * 0.001425 + 0.5)
-        sell_fee = max(1, int(sell_fee_orig * discount + 0.5))
-        sell_tax = int(sell_val * tax_rate)
-        sell_net = sell_val - sell_fee - sell_tax
-        
-        return sell_net - buy_cost
-    else: 
-        sell_val = entry_price * shares
-        sell_fee_orig = int(sell_val * 0.001425 + 0.5)
-        sell_fee = max(1, int(sell_fee_orig * discount + 0.5))
-        sell_tax = int(sell_val * tax_rate)
-        sell_net = sell_val - sell_fee - sell_tax
-        
-        buy_val = current_price * shares
-        buy_fee_orig = int(buy_val * 0.001425 + 0.5)
-        buy_fee = max(1, int(buy_fee_orig * discount + 0.5))
-        buy_cost = buy_val + buy_fee
-        
-        return sell_net - buy_cost
-
 # --- 💾 永久記憶資料庫 ---
 DATA_FILE = "watchlist_data.json"
 
@@ -175,8 +142,7 @@ def cb_add_tw(code, name, target_price=0.0, condition=">="):
         st.session_state.tw_stocks.append({
             "code": code, "name": name, 
             "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
-            "ai_advice": "", "vol_alert_triggered": False,
-            "my_trade_type": "當沖", "my_price": 0.0, "my_lots": 1, "my_dir": "作多" 
+            "ai_advice": "", "vol_alert_triggered": False
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -191,8 +157,7 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
         st.session_state.us_stocks.append({
             "code": code, "name": name, 
             "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
-            "ai_advice": "",
-            "my_price": 0.0, "my_shares": 10, "my_dir": "作多" 
+            "ai_advice": ""
         })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
@@ -218,10 +183,6 @@ if 'initialized' not in st.session_state:
     us_data = data.get("us", [])
     
     for s in tw_data:
-        if 'my_trade_type' not in s: s['my_trade_type'] = "當沖"
-        if 'my_price' not in s: s['my_price'] = 0.0
-        if 'my_lots' not in s: s['my_lots'] = 1
-        if 'my_dir' not in s: s['my_dir'] = "作多"
         if 'alerts' not in s:
             s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
@@ -229,9 +190,6 @@ if 'initialized' not in st.session_state:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
                 if 'type' not in al: al['type'] = "固定價格"
     for s in us_data:
-        if 'my_price' not in s: s['my_price'] = 0.0
-        if 'my_shares' not in s: s['my_shares'] = 10
-        if 'my_dir' not in s: s['my_dir'] = "作多"
         if 'alerts' not in s:
             s['alerts'] = [{"type": "固定價格", "price": s.get('target_price', 0.0), "cond": s.get('condition', '>='), "triggered": s.get('alert_triggered', False), "touch_2_triggered": False}]
         else:
@@ -414,8 +372,8 @@ def get_correlated_stocks(code, name, is_us=False):
         return uniq[:3]
     except: return []
 
-# 🚀 專業級 Altair 磁吸走勢圖
-def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
+# 🚀 升級版：十字狙擊走勢圖 (封印滾輪、固定時間軸、綁定警示線)
+def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     
     chart_df = df_1m[['Close']].copy()
@@ -423,6 +381,15 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     chart_df['Time'] = chart_df.index.tz_convert(tz_str)
     chart_df.rename(columns={'Close': '現價'}, inplace=True)
     
+    # 🚀 鎖定 X 軸時間範圍
+    latest_time = chart_df['Time'].iloc[-1]
+    if is_us:
+        start_time = latest_time.replace(hour=9, minute=30, second=0, microsecond=0).isoformat()
+        end_time = latest_time.replace(hour=16, minute=0, second=0, microsecond=0).isoformat()
+    else:
+        start_time = latest_time.replace(hour=9, minute=0, second=0, microsecond=0).isoformat()
+        end_time = latest_time.replace(hour=13, minute=30, second=0, microsecond=0).isoformat()
+
     color_domain = ['現價']
     color_range = ['#3b82f6']
 
@@ -447,7 +414,10 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
     else:
         y_min, y_max = 0, 100
 
-    base = alt.Chart(df_melted).encode(x=alt.X('Time:T', title='', axis=alt.Axis(format='%H:%M', grid=False, tickCount=10)))
+    # 建立基礎圖表，強制寫入 X 軸範圍 (解決縮放與時間空白問題)
+    base = alt.Chart(df_melted).encode(
+        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time, end_time]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=10))
+    )
     
     line = base.mark_line(strokeWidth=2.5).encode(
         y=alt.Y('價格:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
@@ -461,11 +431,31 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False):
         tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]
     ).add_params(hover)
 
-    rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+    # 🚀 十字狙擊線：垂直虛線
+    v_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
+    
+    # 🚀 十字狙擊線：水平橫線 (跟隨滑鼠碰到的現價)
+    h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+        y='價格:Q',
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+    ).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
 
-    chart = alt.layer(line, rules, points).properties(height=220).interactive(bind_y=False)
+    # 🚀 將下方「固定價格」警示實體化為圖表上的黃色戰術虛線
+    alert_layers = []
+    for al in alerts:
+        if al.get('type') == '固定價格' and al.get('price', 0) > 0:
+            alert_price = al['price']
+            rule = alt.Chart(pd.DataFrame({'價格': [alert_price]})).mark_rule(
+                color='#eab308', strokeWidth=2, strokeDash=[4, 4]
+            ).encode(y='價格:Q')
+            alert_layers.append(rule)
+
+    layers = [line, v_rules, h_rules, points] + alert_layers
+    
+    # 🚀 封印滾輪放大縮小 (不呼叫 .interactive() 即可鎖定畫面)
+    chart = alt.layer(*layers).properties(height=220)
     st.altair_chart(chart, use_container_width=True)
 
 # --- 3. 介面渲染 ---
@@ -749,38 +739,12 @@ with tab_tw:
                 elif vol_info: st.caption(f"📉 {vol_info}")
                 if ai_advice: st.success(ai_advice)
 
-                # 🚀 損益試算完全解鎖開放
-                st.markdown("##### 💰 持倉損益即時試算 (1.8折券商級)")
-                c_pos1, c_pos2, c_pos3, c_pos4, c_pnl = st.columns([1, 1, 1.2, 0.8, 2])
-                with c_pos1:
-                    new_trade_type = st.selectbox("類型", ["當沖", "留倉"], index=0 if stock.get('my_trade_type', '當沖') == "當沖" else 1, key=f"tt_tw_{code}", label_visibility="collapsed")
-                with c_pos2:
-                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_tw_{code}", label_visibility="collapsed")
-                with c_pos3:
-                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=0.5, key=f"my_p_tw_{code}")
-                with c_pos4:
-                    new_lots = st.number_input("張數", value=int(stock.get('my_lots', 1)), min_value=1, step=1, key=f"my_l_tw_{code}")
-                with c_pnl:
-                    if new_price > 0:
-                        pnl = calc_tw_pnl(new_price, curr_p, new_lots, new_dir, new_trade_type)
-                        pnl_color = "normal" if pnl > 0 else "inverse"
-                        cost_base = new_price * new_lots * 1000
-                        pct_ret = (pnl / cost_base) * 100 if cost_base > 0 else 0
-                        st.metric("未實現淨利", f"{pnl:,.0f} 元", f"{pct_ret:+.2f}%", delta_color=pnl_color)
-                
-                if new_trade_type != stock.get('my_trade_type') or new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_lots != stock.get('my_lots'):
-                    st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type
-                    st.session_state.tw_stocks[idx]['my_dir'] = new_dir
-                    st.session_state.tw_stocks[idx]['my_price'] = new_price
-                    st.session_state.tw_stocks[idx]['my_lots'] = new_lots
-                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                    st.rerun()
-
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
                     st.caption(f"📅 **真・即時長均線** | 日線: 3MA(`{mas.get('日線3MA',0):.2f}`) 5MA(`{mas.get('日線5MA',0):.2f}`) 10MA(`{mas.get('日線10MA',0):.2f}`) 23MA(`{mas.get('日線23MA',0):.2f}`) 90MA(`{mas.get('日線90MA',0):.2f}`)")
 
-                render_mini_chart(df_1m, cdp_nh, cdp_nl, is_us=False)
+                # 🚀 繪製十字狙擊線與實體警示防線
+                render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
@@ -996,36 +960,12 @@ with tab_us:
 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.success(ai_advice)
-
-                # 🚀 美股損益試算完全解鎖開放
-                st.markdown("##### 💰 美股持倉即時試算")
-                c_pos1, c_pos2, c_pos3, c_pnl = st.columns([1.2, 1.5, 1, 2])
-                with c_pos1:
-                    new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if stock.get('my_dir', '作多') == "作多" else 1, key=f"dir_us_{code}", label_visibility="collapsed")
-                with c_pos2:
-                    new_price = st.number_input("成交均價", value=float(stock.get('my_price', 0.0)), step=1.0, key=f"my_p_us_{code}")
-                with c_pos3:
-                    new_shares = st.number_input("股數", value=int(stock.get('my_shares', 10)), min_value=1, step=1, key=f"my_l_us_{code}")
-                with c_pnl:
-                    if new_price > 0:
-                        if new_dir == "作多": pnl = (curr_p - new_price) * new_shares
-                        else: pnl = (new_price - curr_p) * new_shares
-                        pnl_color = "normal" if pnl > 0 else "inverse"
-                        pct_ret = (pnl / (new_price * new_shares)) * 100 if new_price > 0 else 0
-                        st.metric("未實現損益", f"${pnl:,.2f}", f"{pct_ret:+.2f}%", delta_color=pnl_color)
-                
-                if new_dir != stock.get('my_dir') or new_price != stock.get('my_price') or new_shares != stock.get('my_shares'):
-                    st.session_state.us_stocks[idx]['my_dir'] = new_dir
-                    st.session_state.us_stocks[idx]['my_price'] = new_price
-                    st.session_state.us_stocks[idx]['my_shares'] = new_shares
-                    save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                    st.rerun()
                 
                 if mas:
                     st.caption(f"📈 **動態短均線** | 5K: 3MA(`{mas.get('5K3MA',0):.2f}`) 5MA(`{mas.get('5K5MA',0):.2f}`) 20MA(`{mas.get('5K20MA',0):.2f}`) ｜ 15K: 3MA(`{mas.get('15K3MA',0):.2f}`) 5MA(`{mas.get('15K5MA',0):.2f}`) 20MA(`{mas.get('15K20MA',0):.2f}`)")
                     st.caption(f"📅 **真・即時長均線** | 日線: 3MA(`{mas.get('日線3MA',0):.2f}`) 5MA(`{mas.get('日線5MA',0):.2f}`) 10MA(`{mas.get('日線10MA',0):.2f}`) 23MA(`{mas.get('日線23MA',0):.2f}`) 90MA(`{mas.get('日線90MA',0):.2f}`)")
 
-                render_mini_chart(df_1m_us, cdp_nh, cdp_nl, is_us=True)
+                render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
 
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
