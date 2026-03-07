@@ -264,12 +264,26 @@ if 'initialized' not in st.session_state:
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
+    # 🚀 策略 1: 使用雲端友善的 FinMind API (不擋海外 IP)
+    try:
+        url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+        res = requests.get(url, timeout=8).json()
+        if res.get('msg') == 'success':
+            for item in res['data']:
+                db[str(item['stock_id'])] = str(item['stock_name'])
+            if db: return db
+    except: pass
+
+    # 🚀 策略 2: 備案 (地端/台灣 IP 專用)
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False)
-        for item in res_tw.json(): db[item['Code']] = item['Name']
+        if res_tw.status_code == 200:
+            for item in res_tw.json(): db[item['Code']] = item['Name']
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False)
-        for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
+        if res_otc.status_code == 200:
+            for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
     except: pass
+    
     return db
 
 @st.cache_data(ttl=60)
@@ -645,11 +659,25 @@ with st.sidebar:
     st.header("🎯 自訂監控加入")
     all_stocks = get_full_stock_db()
     
-    # 🚀 將台股加入方式改為最穩定的手動輸入 (繞過雲端 IP 封鎖)
-    tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330)").strip()
-    if tw_code:
-        tw_name = all_stocks.get(tw_code, tw_code) # 如果抓得到名稱就用，抓不到就用代碼本身
-        st.button(f"➕ 加入 {tw_name} (台股)", on_click=cb_add_tw, args=(tw_code, tw_name))
+    # 🚀 恢復您最愛的模糊搜尋下拉選單
+    if all_stocks:
+        stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
+    else:
+        stock_list = ["伺服器連線異常，請使用下方強制加入"]
+
+    selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
+    if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
+        parts = selected_tw.split(" ")
+        code = parts[0]
+        name = " ".join(parts[1:])
+        st.button(f"➕ 加入 {name} (台股)", on_click=cb_add_tw, args=(code, name))
+
+    # 保留手動輸入作為終極備案
+    with st.expander("🛠️ 找不到？手動強制加入"):
+        tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330)").strip()
+        if tw_code:
+            tw_name = all_stocks.get(tw_code, tw_code)
+            st.button(f"➕ 強制加入 {tw_name} (台股)", on_click=cb_add_tw, args=(tw_code, tw_name))
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if us_code: st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
