@@ -18,7 +18,6 @@ st.set_page_config(page_title="AI 跨海智能戰情室", layout="wide", initial
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 🔐 雙因子認證 (2FA) 金鑰設定 ---
-# 這是您的專屬 Base32 密鑰，請將此密鑰輸入到手機的 Google Authenticator App 中
 TWO_FA_SECRET = "JBSWY3DPEHPK3PXP" 
 
 if 'authenticated' not in st.session_state:
@@ -114,7 +113,6 @@ if API_KEY:
 TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
-# 初始化 Agent 網址 (預設為 Localhost，若部署至雲端請填入 Ngrok 網址)
 if 'agent_url' not in st.session_state:
     st.session_state.agent_url = "http://127.0.0.1:5000"
 
@@ -124,7 +122,6 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
-# --- 🚀 發送下單指令至地端 Agent ---
 def fire_order_to_agent(code, price, action, qty=1):
     url = f"{st.session_state.agent_url.rstrip('/')}/api/fire"
     payload = {"code": code, "price": price, "action": action, "qty": qty}
@@ -134,7 +131,6 @@ def fire_order_to_agent(code, price, action, qty=1):
     except Exception as e:
         return {"status": "error", "msg": "無法連線至地端 Agent，請檢查網址或大腦是否啟動"}
 
-# --- 🚀 券商級當沖/留倉損益計算引擎 ---
 def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000
     discount = 0.18
@@ -182,7 +178,6 @@ def save_watchlist(tw, us):
         with open(DATA_FILE, "w", encoding='utf-8') as f: json.dump({"tw": tw, "us": us}, f, ensure_ascii=False)
     except: pass
 
-# --- 🚀 防彈按鈕 Callbacks ---
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     exists = False
     for s in st.session_state.tw_stocks:
@@ -230,7 +225,6 @@ def cb_clear_all():
     st.session_state.ai_report_swing = None
     save_watchlist([], [])
 
-# 初始化
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     tw_data = data.get("tw", [])
@@ -271,9 +265,9 @@ if 'initialized' not in st.session_state:
 def get_full_stock_db():
     db = {}
     try:
-        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=10, verify=False)
+        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False)
         for item in res_tw.json(): db[item['Code']] = item['Name']
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=10, verify=False)
+        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False)
         for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
     except: pass
     return db
@@ -446,7 +440,6 @@ def get_correlated_stocks(code, name, is_us=False):
     except: 
         return None
 
-# 🚀 左側：十字狙擊走勢圖
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     
@@ -525,7 +518,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-# 🚀 右側：無縫鷹眼 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -614,7 +606,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     chart = alt.layer(*layers).properties(height=260)
     st.altair_chart(chart, use_container_width=True)
 
-
 # --- 側邊欄：安全驗證與雲地中控設定 ---
 with st.sidebar:
     st.title("🛡️ 終極安控中心")
@@ -653,11 +644,12 @@ with st.sidebar:
     st.divider()
     st.header("🎯 自訂監控加入")
     all_stocks = get_full_stock_db()
-    stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
-    selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
-    if selected_tw != "請點此搜尋...":
-        code = selected_tw.split(" ")[0]; name = " ".join(selected_tw.split(" ")[1:])
-        st.button(f"➕ 加入 {name} (台股)", on_click=cb_add_tw, args=(code, name))
+    
+    # 🚀 將台股加入方式改為最穩定的手動輸入 (繞過雲端 IP 封鎖)
+    tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330)").strip()
+    if tw_code:
+        tw_name = all_stocks.get(tw_code, tw_code) # 如果抓得到名稱就用，抓不到就用代碼本身
+        st.button(f"➕ 加入 {tw_name} (台股)", on_click=cb_add_tw, args=(tw_code, tw_name))
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if us_code: st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
@@ -901,12 +893,10 @@ with tab_tw:
                 my_tt = stock.get('my_trade_type', '當沖')
                 has_pos = my_p > 0
 
-                # 🚀 儀表板
                 c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
                 with c_title: st.markdown(f"#### {name}({code})")
                 with c_p: st.metric("現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
 
-                # 🔒 損益隱私遮蔽與 2FA 鎖定
                 with c_pnl:
                     if has_pos:
                         if st.session_state.authenticated:
@@ -927,7 +917,6 @@ with tab_tw:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
 
-                # 🚀 聯動股霸氣置頂
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
                 if not corr_codes:
@@ -952,7 +941,6 @@ with tab_tw:
                 
                 st.divider()
 
-                # 🚀 雙開圖表區域
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.caption("📉 **極速十字走勢圖** (含黃虛線警示防線)")
@@ -967,7 +955,6 @@ with tab_tw:
                     st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
                     render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
 
-                # 🚀 閃電下單指令發送區 (結合 2FA 鎖定)
                 st.markdown("---")
                 if st.session_state.authenticated:
                     c_order1, c_order2, c_order3 = st.columns([2, 1, 1])
@@ -990,7 +977,6 @@ with tab_tw:
                 else:
                     st.info("🔒 閃電交易按鈕已隱藏。請在左側面板輸入 Google Authenticator 密碼以解鎖火力控制權限。")
 
-                # 🚀 交易參數設定 (結合 2FA 鎖定)
                 with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
                     if st.session_state.authenticated:
                         st.markdown("##### 💰 持倉參數設定")
@@ -1132,8 +1118,8 @@ with tab_us:
                 cdp_nh = (2 * cdp) - y_low
                 cdp_nl = (2 * cdp) - y_high
                 mas['CDP(中價)'] = cdp
-                mas['CDP_NH(壓力)'] = cdp_nh
-                mas['CDP_NL(支撐)'] = cdp_nl
+                mas['CDP_NH(压力)'] = cdp_nh
+                mas['CDP_NL(支撑)'] = cdp_nl
             
             is_alert = False
             triggered_msgs = []
