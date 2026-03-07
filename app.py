@@ -112,6 +112,21 @@ def send_telegram_alert(msg):
     try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
     except: pass
 
+# --- 🚀 發送下單指令至背景 Agent ---
+def fire_order_to_agent(code, price, action, qty=1):
+    url = "http://127.0.0.1:5000/api/fire"
+    payload = {
+        "code": code,
+        "price": price,
+        "action": action, 
+        "qty": qty
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=2)
+        return response.json()
+    except Exception as e:
+        return {"status": "error", "msg": "下單大腦未啟動或無法連線"}
+
 # --- 🚀 券商級當沖/留倉損益計算引擎 ---
 def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000
@@ -886,7 +901,7 @@ with tab_tw:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
 
-                # 🚀 聯動股霸氣置頂 (緊貼名稱下方)
+                # 🚀 聯動股霸氣置頂
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 
                 corr_codes = get_correlated_stocks(code, name, is_us=False)
@@ -938,7 +953,27 @@ with tab_tw:
                     st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
                     render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
 
-                # 🚀 交易與警示設定：完美折疊收納，大幅節省高度
+                # 🚀 閃電下單指令發送區 (對接 Port 5000 Agent)
+                st.markdown("---")
+                c_order1, c_order2, c_order3 = st.columns([2, 1, 1])
+                with c_order1:
+                    st.markdown(f"⚡ **快速下單區** (張數設定: {my_l})")
+                with c_order2:
+                    if st.button(f"🔴 閃電買進", key=f"fire_b_tw_{code}", use_container_width=True):
+                        res = fire_order_to_agent(code, curr_p, "Buy", my_l)
+                        if res.get('status') == 'success':
+                            st.toast(f"✅ Agent 收到買進指令: {code}", icon='🔥')
+                        else:
+                            st.error(f"❌ {res.get('msg')}")
+                with c_order3:
+                    if st.button(f"🟢 閃電賣出", key=f"fire_s_tw_{code}", use_container_width=True):
+                        res = fire_order_to_agent(code, curr_p, "Sell", my_l)
+                        if res.get('status') == 'success':
+                            st.toast(f"✅ Agent 收到賣出指令: {code}", icon='❄️')
+                        else:
+                            st.error(f"❌ {res.get('msg')}")
+
+                # 🚀 交易與警示設定：完美折疊收納
                 with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
                     st.markdown("##### 💰 持倉參數設定 (1.8折券商級)")
                     c_pos1, c_pos2, c_pos3, c_pos4 = st.columns(4)
@@ -1166,7 +1201,7 @@ with tab_us:
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
 
-                # 🚀 聯動股霸氣置頂 (緊貼名稱下方)
+                # 🚀 聯動股霸氣置頂
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
 
                 corr_codes = get_correlated_stocks(code, code, is_us=True)
@@ -1215,6 +1250,26 @@ with tab_us:
                         layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
                     st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
                     render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
+
+                # 🚀 閃電下單指令發送區 (對接 Port 5000 Agent)
+                st.markdown("---")
+                c_order1, c_order2, c_order3 = st.columns([2, 1, 1])
+                with c_order1:
+                    st.markdown(f"⚡ **快速下單區** (股數設定: {my_l_us})")
+                with c_order2:
+                    if st.button(f"🔴 閃電買進", key=f"fire_b_us_{code}", use_container_width=True):
+                        res = fire_order_to_agent(code, curr_p, "Buy", my_l_us)
+                        if res.get('status') == 'success':
+                            st.toast(f"✅ Agent 收到買進指令: {code}", icon='🔥')
+                        else:
+                            st.error(f"❌ {res.get('msg')}")
+                with c_order3:
+                    if st.button(f"🟢 閃電賣出", key=f"fire_s_us_{code}", use_container_width=True):
+                        res = fire_order_to_agent(code, curr_p, "Sell", my_l_us)
+                        if res.get('status') == 'success':
+                            st.toast(f"✅ Agent 收到賣出指令: {code}", icon='❄️')
+                        else:
+                            st.error(f"❌ {res.get('msg')}")
 
                 # 🚀 交易與警示設定：完美折疊收納
                 with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
