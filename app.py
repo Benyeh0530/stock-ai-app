@@ -182,7 +182,7 @@ if 'initialized' not in st.session_state:
     if 'market_alert_flags' not in st.session_state: st.session_state.market_alert_flags = {}
     st.session_state.initialized = True
 
-# --- 2. 數據引擎 ---
+# --- 2. 數據引擎 (🚀 效能優化：全面套用快取機制) ---
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
@@ -271,6 +271,8 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
+# 🚀 效能優化 1：為 1分K 加上快取，避免每次點擊按鈕都重新發送 N 次 API 請求
+@st.cache_data(ttl=15, show_spinner=False)
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -282,6 +284,8 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
+# 🚀 效能優化 2：為大宗報價加上快取，支援 Tuple 格式加速 Hashing
+@st.cache_data(ttl=10, show_spinner=False)
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -566,7 +570,6 @@ with st.sidebar:
     if all_stocks: stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     else: stock_list = ["伺服器連線異常，請使用下方強制加入"]
 
-    # 🚀 終極修復：改寫所有「加入」按鈕，強制同步寫入與重繪，消滅幽靈點擊
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
     if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
         parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
@@ -602,7 +605,7 @@ for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
             for i, (cat, stocks) in enumerate(report.items()):
                 with tabs[i]:
                     for s in stocks:
-                        c_p_t = get_bulk_spark_prices([s['code']] if "台股" in cat or "資金" in cat else [], [s['code']] if "美股" in cat else [])
+                        c_p_t = get_bulk_spark_prices(tuple([s['code']] if "台股" in cat or "資金" in cat else []), tuple([s['code']] if "美股" in cat else []))
                         c_p = c_p_t.get(s['code'], (None, None))[0]
                         if c_p is None: c_p, _ = get_single_live_price(s['code'], "美股" in cat)
                         
@@ -615,15 +618,12 @@ for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
                         with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 目標價: {target}"):
                             st.write(f"**策略理由**：{s.get('strategy', '')}")
                             btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
-                            # 🚀 修復 AI 報告內的加入按鈕
                             if "美股" in cat: 
                                 if st.button(btn_txt, key=f"btn_u_{s['code']}_{target}"):
-                                    cb_add_us(s['code'], s['name'], target, cond)
-                                    st.rerun()
+                                    cb_add_us(s['code'], s['name'], target, cond); st.rerun()
                             else: 
                                 if st.button(btn_txt, key=f"btn_t_{s['code']}_{target}"):
-                                    cb_add_tw(s['code'], s['name'], target, cond)
-                                    st.rerun()
+                                    cb_add_tw(s['code'], s['name'], target, cond); st.rerun()
 
 # --- 主畫面渲染 ---
 st.title("⚡ AI 雲地混合智能戰情室")
@@ -633,10 +633,12 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-all_tw_to_fetch = set([s['code'] for s in st.session_state.tw_stocks])
-all_us_to_fetch = set([s['code'] for s in st.session_state.us_stocks])
-all_us_to_fetch.add('^TWII')
-live_price_dict = get_bulk_spark_prices(list(all_tw_to_fetch), list(all_us_to_fetch))
+# 🚀 效能優化 3：利用 Tuple 確保快取 Hash 正常運作
+all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
+us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
+all_us_to_fetch = tuple(us_set)
+
+live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
 market_temp = get_market_temp()
 
 col_t1, col_t2, col_t3 = st.columns(3)
