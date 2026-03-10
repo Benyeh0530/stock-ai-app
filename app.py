@@ -80,7 +80,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
-# 徹底移除前端 Session 記憶，強制只從系統 Secrets 讀取
 API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if API_KEY:
@@ -536,7 +535,6 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    # 🛡️ 徹底移除手動輸入框，只顯示後台連線燈號
     st.header("🤖 AI 引擎狀態")
     if not API_KEY:
         st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
@@ -568,23 +566,33 @@ with st.sidebar:
     if all_stocks: stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     else: stock_list = ["伺服器連線異常，請使用下方強制加入"]
 
+    # 🚀 終極修復：改寫所有「加入」按鈕，強制同步寫入與重繪，消滅幽靈點擊
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
     if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
         parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
-        st.button(f"➕ 加入 {name} (台股)", on_click=cb_add_tw, args=(code, name))
+        if st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}"):
+            cb_add_tw(code, name)
+            st.rerun()
 
     with st.expander("🛠️ 找不到？手動強制加入"):
         tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
-            st.button(f"➕ 強制加入 {tw_name} (台股)", on_click=cb_add_tw, args=(tw_code, tw_name))
+            if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
+                cb_add_tw(tw_code, tw_name)
+                st.rerun()
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
-    if us_code: st.button(f"➕ 加入 {us_code} (美股)", on_click=cb_add_us, args=(us_code, us_code))
+    if us_code: 
+        if st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}"):
+            cb_add_us(us_code, us_code)
+            st.rerun()
             
     st.divider()
     auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
-    st.button("🗑️ 徹底清空所有資料", on_click=cb_clear_all, type="secondary")
+    if st.button("🗑️ 徹底清空所有資料", type="secondary"):
+        cb_clear_all()
+        st.rerun()
 
 # --- AI 報告渲染 ---
 for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
@@ -607,8 +615,15 @@ for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
                         with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 目標價: {target}"):
                             st.write(f"**策略理由**：{s.get('strategy', '')}")
                             btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
-                            if "美股" in cat: st.button(btn_txt, key=f"btn_u_{s['code']}", on_click=cb_add_us, args=(s['code'], s['name'], target, cond))
-                            else: st.button(btn_txt, key=f"btn_t_{s['code']}", on_click=cb_add_tw, args=(s['code'], s['name'], target, cond))
+                            # 🚀 修復 AI 報告內的加入按鈕
+                            if "美股" in cat: 
+                                if st.button(btn_txt, key=f"btn_u_{s['code']}_{target}"):
+                                    cb_add_us(s['code'], s['name'], target, cond)
+                                    st.rerun()
+                            else: 
+                                if st.button(btn_txt, key=f"btn_t_{s['code']}_{target}"):
+                                    cb_add_tw(s['code'], s['name'], target, cond)
+                                    st.rerun()
 
 # --- 主畫面渲染 ---
 st.title("⚡ AI 雲地混合智能戰情室")
@@ -789,7 +804,10 @@ with tab_tw:
                     else: st.metric("未實現淨利", "--", delta_color="off")
                 with c_r1: st.metric("壓力(R1)", f"{r1:.2f}", delta_color="off")
                 with c_s1: st.metric("支撐(S1)", f"{s1:.2f}", delta_color="off")
-                with c_del: st.button("❌", key=f"del_tw_{code}", on_click=cb_remove_tw, args=(idx,))
+                with c_del: 
+                    if st.button("❌", key=f"del_tw_{code}"):
+                        cb_remove_tw(idx)
+                        st.rerun()
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
@@ -988,7 +1006,10 @@ with tab_us:
                     else: st.metric("未實現損益", "--", delta_color="off")
                 with c_r1: st.metric("壓力(R1)", f"${r1:.2f}", delta_color="off")
                 with c_s1: st.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
-                with c_del: st.button("❌", key=f"del_us_{code}", on_click=cb_remove_us, args=(idx,))
+                with c_del: 
+                    if st.button("❌", key=f"del_us_{code}"):
+                        cb_remove_us(idx)
+                        st.rerun()
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
