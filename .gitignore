@@ -1,0 +1,12 @@
+# 忽略 Streamlit 機密設定檔
+.streamlit/secrets.toml
+
+# 忽略本機端個人資料庫 (保護您的自選股隱私)
+watchlist_data.json
+
+# 忽略 Python 暫存與環境檔
+__pycache__/
+*.pyc
+.env
+venv/
+env/
