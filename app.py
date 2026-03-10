@@ -79,17 +79,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 引擎與雲地通訊設定 ---
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = st.secrets.get("GEMINI_API_KEY", "")
+# --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
+# 徹底移除前端 Session 記憶，強制只從系統 Secrets 讀取
+API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
-API_KEY = st.session_state.api_key
 if API_KEY:
     genai.configure(api_key=API_KEY)
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
-TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", os.environ.get("TELEGRAM_CHAT_ID", ""))
 
 if 'agent_url' not in st.session_state:
     st.session_state.agent_url = "http://127.0.0.1:5000"
@@ -340,7 +339,6 @@ def fetch_ai_list(report_type, api_key_hash):
         return None
     except: return None
 
-# 🚀 修復 AI 雷達卡死：綁定 API_KEY 作為參數，確保 Key 變更時刷新快取
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_correlated_stocks(code, name, key_hash, is_us=False):
     if not key_hash: return []
@@ -402,7 +400,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
     y_min, y_max = (valid_prices.min() * 0.995, valid_prices.max() * 1.005) if not valid_prices.empty else (0, 100)
 
-    # 主圖
     base = alt.Chart(df_melted).encode(x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=8)))
     line = base.mark_line(strokeWidth=2.5).encode(
         y=alt.Y('價格:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
@@ -421,7 +418,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     main_chart = alt.layer(line, v_rules, h_rules, points, *alert_layers).properties(height=200)
 
-    # 副圖
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
     vol_chart = alt.Chart(chart_df).mark_bar(opacity=0.6).encode(
@@ -433,7 +429,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# 🚀 終極修復：無縫平移 K 線與消除非交易時間斷層
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"], lookback=60):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -457,7 +452,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
     df_chart['Time'] = df_chart.index.tz_convert(tz_str)
     
-    # 🔓 關鍵修復 1：過濾非交易時段，根除圖表空白斷層
     if tf != "日K":
         df_chart = df_chart.set_index('Time')
         if is_us: df_chart = df_chart.between_time('09:30', '16:00')
@@ -468,7 +462,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
     if df_chart.empty: return
 
-    # 🔓 關鍵修復 2：映射至連續索引，支援完美平移拖曳
     df_chart['x_idx'] = np.arange(len(df_chart))
     axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
     df_chart['TimeStr'] = df_chart['Time'].dt.strftime(axis_format)
@@ -482,7 +475,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     pan_zoom = alt.selection_interval(bind='scales', encodings=['x'])
     
-    # 強制關閉 X 軸文字標籤，完美消滅重疊亂碼
     base = alt.Chart(df_chart).encode(
         x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[start_idx, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False))
     )
@@ -544,19 +536,12 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.header("🤖 AI 引擎與 API 設定")
-    if not st.session_state.api_key:
-        st.error("🔴 API 未設定 (AI 雷達與算價已停擺)")
-        user_key = st.text_input("🔑 輸入 Gemini API Key 啟動 AI", type="password")
-        if st.button("💾 儲存 API Key 並啟動", use_container_width=True, type="primary"):
-            st.session_state.api_key = user_key
-            get_correlated_stocks.clear() # 🚀 強制清洗舊快取
-            st.rerun()
+    # 🛡️ 徹底移除手動輸入框，只顯示後台連線燈號
+    st.header("🤖 AI 引擎狀態")
+    if not API_KEY:
+        st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
     else:
-        st.success("🟢 API 已連線，AI 引擎運轉中")
-        if st.button("🗑️ 清除 API Key", use_container_width=True):
-            st.session_state.api_key = ""
-            st.rerun()
+        st.success("🟢 API 已連線，AI 引擎運轉中 (金鑰已隱藏)")
 
     st.divider()
     st.header("⚙️ 圖表視角設定")
@@ -645,7 +630,7 @@ with col_t1:
 with col_t2:
     if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    if API_KEY: st.success(f"🟢 API 火力全開 | 最後跳動: {now_tpe.strftime('%H:%M:%S')}")
+    if API_KEY: st.success(f"🟢 AI 雷達待命中 | 隱碼保護啟用")
     else: st.error("🔴 API 未設定")
 
 st.divider()
@@ -811,14 +796,13 @@ with tab_tw:
 
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 
-                # 🚀 修復雷達卡死：帶入 API_KEY 作為參數
                 corr_codes = get_correlated_stocks(code, name, API_KEY, is_us=False)
                 if not corr_codes:
                     if API_KEY:
                         get_correlated_stocks.clear(code, name, API_KEY, is_us=False)
                         st.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，AI 重新鎖定中... (稍後自動重試)</div>", unsafe_allow_html=True)
                     else:
-                        st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需在左側輸入 API Key 以解鎖此功能。</div>", unsafe_allow_html=True)
+                        st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需設定後台 API 金鑰以解鎖此功能。</div>", unsafe_allow_html=True)
                 else:
                     corr_display = []
                     for i, c in enumerate(corr_codes):
@@ -834,7 +818,6 @@ with tab_tw:
                 
                 st.divider()
 
-                # 🚀 修復排版對齊：統一將控制項拉出
                 c_ctrl1, c_ctrl2, c_ctrl3 = st.columns([1.5, 1, 1])
                 with c_ctrl1: st.markdown("##### 📉 雙視角走勢與無縫 K 線圖")
                 with c_ctrl2: tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
@@ -1010,14 +993,13 @@ with tab_us:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 
-                # 🚀 修復雷達卡死：帶入 API_KEY 作為參數
                 corr_codes = get_correlated_stocks(code, code, API_KEY, is_us=True)
                 if not corr_codes:
                     if API_KEY:
                         get_correlated_stocks.clear(code, code, API_KEY, is_us=True)
                         st.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，AI 重新鎖定中... (稍後自動重試)</div>", unsafe_allow_html=True)
                     else:
-                        st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需在左側輸入 API Key 以解鎖此功能。</div>", unsafe_allow_html=True)
+                        st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需設定後台 API 金鑰以解鎖此功能。</div>", unsafe_allow_html=True)
                 else:
                     corr_display = []
                     for i, c in enumerate(corr_codes):
@@ -1033,7 +1015,6 @@ with tab_us:
 
                 st.divider()
                 
-                # 🚀 修復排版對齊：統一將控制項拉出
                 c_ctrl1, c_ctrl2, c_ctrl3 = st.columns([1.5, 1, 1])
                 with c_ctrl1: st.markdown("##### 📉 雙視角走勢與無縫 K 線圖")
                 with c_ctrl2: tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
