@@ -105,7 +105,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 1. 引擎與雲地通訊設定 ---
-API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# 🚀 優化：從 Session State 動態讀取 API Key
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = st.secrets.get("GEMINI_API_KEY", "")
+
+API_KEY = st.session_state.api_key
 if API_KEY:
     genai.configure(api_key=API_KEY)
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
@@ -455,7 +459,6 @@ def get_correlated_stocks(code, name, is_us=False):
             continue
     return None
 
-# --- ✨ 升級版圖表：價格線與成交量完美連動 ---
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     
@@ -463,7 +466,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
     chart_df['Time'] = chart_df.index.tz_convert(tz_str)
     
-    # ✅ 關鍵修復：建立 '現價' 欄位，供圖表對應
     chart_df['現價'] = chart_df['Close']
     
     latest_time = chart_df['Time'].iloc[-1]
@@ -492,7 +494,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)'])
         color_range.extend(['#ef4444', '#10b981'])
     
-    # ✅ 關鍵修復：Melt 的時候把 Open, Close, Volume 放進 id_vars 避免被混淆
     df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
     
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
@@ -526,7 +527,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     main_chart = alt.layer(line, v_rules, h_rules, points, *alert_layers).properties(height=200)
 
-    # 副圖 (成交量)
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
     
@@ -540,7 +540,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     final_chart = alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0)
     st.altair_chart(final_chart, use_container_width=True)
 
-# --- ✨ 升級版 K 線圖：加入回測長度與成交量 ---
+# --- ✨ 升級版 K 線圖：支援平移縮放與成交量 ---
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"], lookback=60):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -565,23 +565,28 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
     df_chart['Time'] = df_chart.index.tz_convert(tz_str)
     
-    # 套用使用者選擇的回溯長度
-    df_chart = df_chart.tail(lookback) 
+    # 🔓 關鍵修復：解除歷史鎖定！保留 300 根緩衝區供使用者平移滑動
+    df_chart = df_chart.tail(300) 
     if df_chart.empty: return
     
-    if tf == "日K":
-        df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%y/%m/%d')
-    else:
-        df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%m/%d %H:%M')
-        
     y_min = df_chart['Low'].min() * 0.995
     y_max = df_chart['High'].max() * 1.005
     
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
     
+    # 🚀 建立互動平移縮放 (Pan & Zoom) 元件
+    pan_zoom = alt.selection_interval(bind='scales', encodings=['x'])
+    
+    # 設定「初始視角」範圍，確保一開始只顯示設定的 lookback 根數
+    start_idx = max(0, len(df_chart) - lookback)
+    start_time_iso = df_chart['Time'].iloc[start_idx].isoformat()
+    end_time_iso = df_chart['Time'].iloc[-1].isoformat()
+    
+    # 這裡改用 Time:T 讓時間軸支援連續的平移與縮放
+    axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
     base = alt.Chart(df_chart).encode(
-        x=alt.X('TimeStr:O', sort=alt.SortField(field='Time', order='ascending'), title='', axis=alt.Axis(labelAngle=-45, labelOverlap=True))
+        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time_iso, end_time_iso]), axis=alt.Axis(format=axis_format, labelAngle=-45, grid=False))
     )
     
     layers = []
@@ -596,7 +601,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             y='Open:Q',
             y2='Close:Q',
             color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-            tooltip=[alt.Tooltip('TimeStr:N', title='時間'), 'Open', 'High', 'Low', 'Close', 'Volume']
+            tooltip=[alt.Tooltip('Time:T', format=axis_format, title='時間'), 'Open', 'High', 'Low', 'Close', 'Volume']
         )
         layers.extend([rule, bar])
     
@@ -606,7 +611,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             ma_line = base.mark_line(size=1.5, opacity=0.8).encode(
                 y=alt.Y(f'{ma}:Q'),
                 color=alt.value(ma_colors[ma]),
-                tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip(f'{ma}:Q', format='.2f', title=ma)]
+                tooltip=[alt.Tooltip('Time:T', format=axis_format, title='時間'), alt.Tooltip(f'{ma}:Q', format='.2f', title=ma)]
             )
             layers.append(ma_line)
             
@@ -624,14 +629,15 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         st.altair_chart(blank, use_container_width=True)
         return
         
-    main_kline = alt.layer(*layers).properties(height=200)
+    # 綁定平移縮放參數到主圖
+    main_kline = alt.layer(*layers).properties(height=200).add_params(pan_zoom)
 
-    # 副圖 (成交量)
+    # 副圖 (成交量) 同樣綁定平移縮放參數，確保上下完美連動
     vol_chart = base.mark_bar(opacity=0.6).encode(
         y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
         color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-        tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
-    ).properties(height=60)
+        tooltip=[alt.Tooltip('Time:T', format=axis_format, title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+    ).properties(height=60).add_params(pan_zoom)
 
     final_kline = alt.vconcat(main_kline, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0)
     st.altair_chart(final_kline, use_container_width=True)
@@ -658,9 +664,24 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.header("⚙️ 圖表深度設定")
-    ui_lookback = st.select_slider("🕯️ K 線顯示根數", options=[30, 60, 90, 120, 240], value=60)
-    st.caption(f"目前將為您渲染前 {ui_lookback} 根 K 棒")
+    # 🚀 新增：內建 API Key 設定 UI，再也不怕「未設定」
+    st.header("🤖 AI 引擎與 API 設定")
+    if not st.session_state.api_key:
+        st.error("🔴 API 未設定 (AI 雷達與算價已停擺)")
+        user_key = st.text_input("🔑 輸入 Gemini API Key 啟動 AI", type="password")
+        if st.button("💾 儲存 API Key 並啟動", use_container_width=True, type="primary"):
+            st.session_state.api_key = user_key
+            st.rerun()
+    else:
+        st.success("🟢 API 已連線，AI 引擎運轉中")
+        if st.button("🗑️ 清除 API Key", use_container_width=True):
+            st.session_state.api_key = ""
+            st.rerun()
+
+    st.divider()
+    st.header("⚙️ 圖表初始視角設定")
+    ui_lookback = st.select_slider("🕯️ 預設顯示 K 棒數量", options=[30, 60, 90, 120, 240], value=60)
+    st.caption("設定後，圖表上仍可透過滑鼠拖曳或滾輪自由往前追溯 300 根歷史 K 線。")
             
     st.divider()
     st.header("🌐 雲地通訊設定")
@@ -999,7 +1020,7 @@ with tab_tw:
                         tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
                     with c_k2:
                         layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (可拖曳平移、滾輪縮放)")
                     render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel, lookback=ui_lookback)
 
                 st.markdown("---")
@@ -1280,7 +1301,7 @@ with tab_us:
                         tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
                     with c_k2:
                         layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
-                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (黃MA3 藍MA5 紫MA10 粉MA23)")
+                    st.caption(f"🕯️ **{tf_sel} 鷹眼 K 線圖** (可拖曳平移、滾輪縮放)")
                     render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel, lookback=ui_lookback)
 
                 st.markdown("---")
