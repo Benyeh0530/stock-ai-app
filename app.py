@@ -79,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 引擎與雲地通訊設定 ---
+# --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if API_KEY:
@@ -180,7 +180,6 @@ if 'initialized' not in st.session_state:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
                 if 'type' not in al: al['type'] = "固定價格"
     
-    # 🚀 初始化 4 大報告變數
     st.session_state.ai_report_daytrade = None
     st.session_state.ai_report_overnight = None
     st.session_state.ai_report_swing = None
@@ -334,19 +333,19 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
-# 🚀 AI 報告 4 大主題精準 Prompt 設計
+# 🚀 AI 引擎升級：注入 4 大過濾條件 (150元以下、震幅大、量增、熱門趨勢股)
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
     
     if report_type == "daytrade": 
-        prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空的台股標的。找尋高波動活躍股。嚴格限制只輸出JSON。JSON: {{ '當沖作多': [], '當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+        prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空的台股標的。條件：1. 股價必須在150元以下。2. 震幅大、高波動且交投活躍。嚴格限制只輸出JSON。JSON: {{ '當沖作多': [], '當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
     elif report_type == "overnight":
-        prompt = f"時間 {now}。你是台股隔日沖高手。提供5檔隔日沖台股標的。尋找尾盤強勢、籌碼集中的標的。嚴格限制只輸出JSON。JSON: {{ '隔日沖潛力股': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+        prompt = f"時間 {now}。你是台股隔日沖高手。現在時間是12:00之後，請綜合今日早盤與午盤資訊，提供5檔隔日沖台股標的。條件：1. 股價必須在150元以下。2. 今日成交量顯著大於過去幾日均量。3. 盤中走勢強勢且籌碼集中。4. 分析盤中大單軌跡，推估是否有知名隔日沖券商(如：凱基-台北、富邦-建國等)進駐，並在理由中列出預估的主力建倉均價。嚴格限制只輸出JSON。JSON: {{ '隔日沖潛力股': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由含量能與主力均價分析'}})"
     elif report_type == "swing":
-        prompt = f"時間 {now}。你是台股波段操盤手。提供5檔短波段/波段台股標的。尋找具備題材與技術面剛突破的標的。嚴格限制只輸出JSON。JSON: {{ '台股波段推薦': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
-    else: # us_stocks
+        prompt = f"時間 {now}。你是台股波段操盤手。提供5檔短波段/波段台股標的。條件：1. 股價必須在150元以下。2. 必須是近期熱門趨勢股(具備爆發性量能與市場話題炒作)。3. 技術面剛突破或多頭排列。嚴格限制只輸出JSON。JSON: {{ '台股波段推薦': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+    else: 
         prompt = f"時間 {now}。你是美股操盤手。提供5檔強勢作多、5檔弱勢作空的美股波段標的。嚴格限制只輸出JSON。JSON: {{ '美股作多': [], '美股作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
         
     try:
@@ -568,7 +567,6 @@ with st.sidebar:
         st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
 
     st.divider()
-    # 🚀 AI 選股四大主題按鈕
     st.header("🤖 AI 選股報告分流")
     if st.button("🚀 生成【台股當沖】報告", use_container_width=True, type="primary"):
         st.session_state.ai_report_daytrade = fetch_ai_list("daytrade", API_KEY); st.rerun()
@@ -669,7 +667,6 @@ if twii_cp and twii_mas:
     
     st.divider()
 
-# 🚀 將主畫面一分為四，AI 報告擁有獨立大頁籤！
 tab_tw, tab_us, tab_ai, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🤖 AI 選股報告", "🐢 10年期核心長線"])
 
 # ====================
@@ -1093,7 +1090,7 @@ with tab_us:
                                 except: pass
 
 # ====================
-# 戰區 3：🤖 AI 選股報告中心 (🚀 全新獨立頁籤)
+# 戰區 3：🤖 AI 選股報告中心
 # ====================
 with tab_ai:
     st.markdown("### 🤖 跨海智能 AI 選股報告中心")
