@@ -164,10 +164,7 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
 def cb_remove_tw(idx): st.session_state.tw_stocks.pop(idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 def cb_clear_all():
-    st.session_state.tw_stocks = []; st.session_state.us_stocks = []
-    st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None
-    st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None
-    save_watchlist([], [])
+    st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
 if 'initialized' not in st.session_state:
     data = load_watchlist()
@@ -180,11 +177,7 @@ if 'initialized' not in st.session_state:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
                 if 'type' not in al: al['type'] = "固定價格"
     
-    st.session_state.ai_report_daytrade = None
-    st.session_state.ai_report_overnight = None
-    st.session_state.ai_report_swing = None
-    st.session_state.ai_report_us = None
-    
+    st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None
     st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
     if 'market_alert_flags' not in st.session_state: st.session_state.market_alert_flags = {}
     st.session_state.initialized = True
@@ -333,7 +326,6 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
-# 🚀 AI 引擎升級：注入 4 大過濾條件 (150元以下、震幅大、量增、熱門趨勢股)
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
@@ -795,6 +787,41 @@ with tab_tw:
 
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 
+                # 🚀 新增：當日主力大單與爆量明細追蹤 (逆向工程版)
+                with st.expander("📜 當日大單與主力足跡 (由1分K逆向推算)", expanded=False):
+                    if not df_1m.empty:
+                        df_m = df_1m.copy()
+                        df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
+                        latest_time = df_m['Time'].iloc[-1]
+                        today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                        df_today = df_m[df_m['Time'] >= today_start].copy()
+                        
+                        if len(df_today) > 5:
+                            df_today['Vol_MA10'] = df_today['Volume'].rolling(10, min_periods=1).mean()
+                            avg_vol_day = df_today['Volume'].mean()
+                            
+                            # 台股判定條件：瞬間大於10分均量2倍，且大於日均量1.5倍，且單筆大於50張(50,000股)以過濾雞蛋水餃股雜訊
+                            spike_cond = (df_today['Volume'] > df_today['Vol_MA10'] * 2.0) & (df_today['Volume'] > avg_vol_day * 1.5) & (df_today['Volume'] >= 50000)
+                            spikes = df_today[spike_cond].copy()
+                            
+                            if not spikes.empty:
+                                spikes = spikes.sort_index(ascending=False).head(10)
+                                for _, row in spikes.iterrows():
+                                    t_str = row['Time'].strftime("%H:%M")
+                                    is_buy = row['Close'] >= row['Open']
+                                    icon = "🔴" if is_buy else "🟢"
+                                    action = "大單敲進" if is_buy else "大單倒貨"
+                                    color = "#ef4444" if is_buy else "#10b981"
+                                    v_disp = f"{row['Volume']/1000:,.0f} 張"
+                                        
+                                    st.markdown(f"<div style='padding:4px; border-bottom:1px solid #334155; font-size:0.95rem;'>"
+                                                f"<b>{icon} {t_str}</b> | 價格: <b>{row['Close']:.2f}</b> | 爆量推估: <span style='color:{color}; font-weight:bold;'>{v_disp} ({action})</span>"
+                                                f"</div>", unsafe_allow_html=True)
+                            else:
+                                st.caption("今日盤中尚未偵測到顯著的異常大單。")
+                        else:
+                            st.caption("盤中資料累積中...")
+
                 corr_codes = get_correlated_stocks(code, name, API_KEY, is_us=False)
                 if not corr_codes:
                     if API_KEY:
@@ -989,6 +1016,41 @@ with tab_us:
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
                 
+                # 🚀 新增：當日主力大單與爆量明細追蹤 (美股版)
+                with st.expander("📜 當日大單與主力足跡 (由1分K逆向推算)", expanded=False):
+                    if not df_1m_us.empty:
+                        df_m = df_1m_us.copy()
+                        df_m['Time'] = df_m.index.tz_convert('America/New_York')
+                        latest_time = df_m['Time'].iloc[-1]
+                        today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                        df_today = df_m[df_m['Time'] >= today_start].copy()
+                        
+                        if len(df_today) > 5:
+                            df_today['Vol_MA10'] = df_today['Volume'].rolling(10, min_periods=1).mean()
+                            avg_vol_day = df_today['Volume'].mean()
+                            
+                            # 美股判定條件：大於10分均量2倍，大於日均量1.5倍，且單筆大於1萬股
+                            spike_cond = (df_today['Volume'] > df_today['Vol_MA10'] * 2.0) & (df_today['Volume'] > avg_vol_day * 1.5) & (df_today['Volume'] >= 10000)
+                            spikes = df_today[spike_cond].copy()
+                            
+                            if not spikes.empty:
+                                spikes = spikes.sort_index(ascending=False).head(10)
+                                for _, row in spikes.iterrows():
+                                    t_str = row['Time'].strftime("%H:%M")
+                                    is_buy = row['Close'] >= row['Open']
+                                    icon = "🟢" if is_buy else "🔴"  # 美股綠漲紅跌
+                                    action = "大單敲進" if is_buy else "大單倒貨"
+                                    color = "#10b981" if is_buy else "#ef4444"
+                                    v_disp = f"{row['Volume']:,.0f} 股"
+                                        
+                                    st.markdown(f"<div style='padding:4px; border-bottom:1px solid #334155; font-size:0.95rem;'>"
+                                                f"<b>{icon} {t_str}</b> | 價格: <b>${row['Close']:.2f}</b> | 爆量推估: <span style='color:{color}; font-weight:bold;'>{v_disp} ({action})</span>"
+                                                f"</div>", unsafe_allow_html=True)
+                            else:
+                                st.caption("今日盤中尚未偵測到顯著的異常大單。")
+                        else:
+                            st.caption("盤中資料累積中...")
+
                 corr_codes = get_correlated_stocks(code, code, API_KEY, is_us=True)
                 if not corr_codes:
                     if API_KEY:
