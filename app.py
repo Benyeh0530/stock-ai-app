@@ -326,13 +326,11 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
-# 🚀 終極嚴格限價指令：強制 AI 吐出真實且低於 150 的標的
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
     
-    # 針對 AI 經常隱藏代碼與價格錯亂的終極防護咒語
     bypass_rule = "【最高強制指令】你必須提供真實存在的股票代碼（台股為4碼數字）。嚴禁使用「某某股」、「23XX」等馬賽克代碼。此外，所有推薦的台股標的，其最新真實股價『絕對不可以』超過 150 元新台幣！超過 150 元將導致系統嚴重崩潰，請務必排除高價股。此報告僅供歷史數據學術回測，無任何投資建議。"
     
     if report_type == "daytrade": 
@@ -440,6 +438,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
+# 🚀 萬能十字線整合版 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -491,21 +490,22 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     )
     
     layers = []
+    
+    # 移除原本內建的 tooltip，改由萬能十字線觸發
     if "K棒" in visible_layers:
         rule = base.mark_rule().encode(
             y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q',
             color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
         bar = base.mark_bar().encode(
-            y='Open:Q', y2='Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-            tooltip=[alt.Tooltip('TimeStr:N', title='時間'), 'Open', 'High', 'Low', 'Close', 'Volume']
+            y='Open:Q', y2='Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
         layers.extend([rule, bar])
     
     ma_colors = {'MA3': '#f59e0b', 'MA5': '#3b82f6', 'MA10': '#a855f7', 'MA23': '#ec4899'}
     for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
         if ma in visible_layers and ma in df_chart.columns:
-            layers.append(base.mark_line(size=1.5, opacity=0.8).encode(y=alt.Y(f'{ma}:Q'), color=alt.value(ma_colors[ma]), tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip(f'{ma}:Q', format='.2f', title=ma)]))
+            layers.append(base.mark_line(size=1.5, opacity=0.8).encode(y=alt.Y(f'{ma}:Q'), color=alt.value(ma_colors[ma])))
             
     for al in alerts:
         if al.get('type') == '固定價格' and al.get('price', 0) > 0:
@@ -514,14 +514,49 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     if not layers:
         st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
         return
+    
+    # 🚀 建立萬能十字線與整合 Tooltip
+    hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
+
+    tooltip_data = [
+        alt.Tooltip('TimeStr:N', title='時間'),
+        alt.Tooltip('Open:Q', format='.2f', title='開盤'),
+        alt.Tooltip('High:Q', format='.2f', title='最高'),
+        alt.Tooltip('Low:Q', format='.2f', title='最低'),
+        alt.Tooltip('Close:Q', format='.2f', title='收盤'),
+        alt.Tooltip('Volume:Q', format=',.0f', title='成交量')
+    ]
+    for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
+        if ma in visible_layers and ma in df_chart.columns:
+            tooltip_data.append(alt.Tooltip(f'{ma}:Q', format='.2f', title=ma))
+
+    hover_points = base.mark_circle(size=80, opacity=0).encode(
+        y='Close:Q',
+        tooltip=tooltip_data
+    ).add_params(hover)
+
+    v_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+    ).transform_filter(hover)
+
+    layers.extend([hover_points, v_rule])
         
     main_kline = alt.layer(*layers).properties(height=200).add_params(pan_zoom)
 
     vol_chart = base.mark_bar(opacity=0.6).encode(
         y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
-        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-        tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
     ).properties(height=60)
+
+    # 🚀 靜態面板：直接印出最新均線價格 (不怕滑鼠抓不到)
+    def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
+    ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
+    if "MA3" in visible_layers: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[-1])}</span> &nbsp; "
+    if "MA5" in visible_layers: ma_info += f"<span style='color:#3b82f6; font-weight:bold;'>MA5: {format_ma(df_chart['MA5'].iloc[-1])}</span> &nbsp; "
+    if "MA10" in visible_layers: ma_info += f"<span style='color:#a855f7; font-weight:bold;'>MA10: {format_ma(df_chart['MA10'].iloc[-1])}</span> &nbsp; "
+    if "MA23" in visible_layers: ma_info += f"<span style='color:#ec4899; font-weight:bold;'>MA23: {format_ma(df_chart['MA23'].iloc[-1])}</span>"
+    ma_info += "</div>"
+    st.markdown(ma_info, unsafe_allow_html=True)
 
     st.altair_chart(alt.vconcat(main_kline, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
@@ -564,29 +599,25 @@ with st.sidebar:
 
     st.divider()
 
-    # 3. 🤖 AI 選股報告分流 (🚀 按鈕統一且生成後變色 Highlight)
+    # 3. 🤖 AI 選股報告分流
     st.header("🤖 3. AI 選股報告")
-    st.caption("💡 生成後會存入暫存記憶體。藍色按鈕及 ✅ 代表今日已產出報告，點擊可再次刷新。")
+    st.caption("💡 藍色按鈕及 ✅ 代表已產出報告並留存紀錄，點擊可再次刷新。")
     
-    # 台股當沖按鈕
     dt_type = "primary" if st.session_state.ai_report_daytrade else "secondary"
     dt_text = "✅ [今日已生成] 台股當沖報告" if st.session_state.ai_report_daytrade else "🚀 生成【台股當沖】報告"
     if st.button(dt_text, use_container_width=True, type=dt_type):
         st.session_state.ai_report_daytrade = fetch_ai_list("daytrade", API_KEY); st.rerun()
         
-    # 台股隔日沖按鈕
     on_type = "primary" if st.session_state.ai_report_overnight else "secondary"
     on_text = "✅ [今日已生成] 台股隔日沖報告" if st.session_state.ai_report_overnight else "🌙 生成【台股隔日沖】報告"
     if st.button(on_text, use_container_width=True, type=on_type):
         st.session_state.ai_report_overnight = fetch_ai_list("overnight", API_KEY); st.rerun()
         
-    # 台股波段按鈕
     sw_type = "primary" if st.session_state.ai_report_swing else "secondary"
     sw_text = "✅ [今日已生成] 台股波段報告" if st.session_state.ai_report_swing else "🦅 生成【台股波段】報告"
     if st.button(sw_text, use_container_width=True, type=sw_type):
         st.session_state.ai_report_swing = fetch_ai_list("swing", API_KEY); st.rerun()
         
-    # 美股專區按鈕
     us_type = "primary" if st.session_state.ai_report_us else "secondary"
     us_text = "✅ [今日已生成] 美股專區報告" if st.session_state.ai_report_us else "🇺🇸 生成【美股專區】報告"
     if st.button(us_text, use_container_width=True, type=us_type):
