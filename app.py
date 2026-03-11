@@ -521,56 +521,12 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
 
     st.altair_chart(alt.vconcat(main_kline, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# --- 側邊欄：安全驗證與雲地中控設定 ---
+# --- 側邊欄：全新順序配置 ---
 with st.sidebar:
     st.title("🛡️ 終極安控中心")
     
-    if not st.session_state.authenticated:
-        st.warning("🔒 損益與下單功能已鎖定")
-        auth_code = st.text_input("輸入 Google Authenticator 6碼驗證碼", type="password")
-        if st.button("解鎖戰情室", use_container_width=True, type="primary"):
-            totp = pyotp.TOTP(TWO_FA_SECRET)
-            if totp.verify(auth_code):
-                st.session_state.authenticated = True
-                st.success("✅ 身分驗證成功，武器系統已解鎖！")
-                st.rerun()
-            else:
-                st.error("❌ 驗證碼錯誤")
-    else:
-        st.success("🔓 指揮官已登入，火力全開")
-        if st.button("登出並鎖定", use_container_width=True):
-            st.session_state.authenticated = False
-            st.rerun()
-
-    st.divider()
-    st.header("🤖 AI 引擎狀態")
-    if not API_KEY: st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
-    else: st.success("🟢 API 已連線，AI 引擎運轉中 (金鑰已隱藏)")
-
-    st.divider()
-    st.header("⚙️ 圖表視角設定")
-    ui_lookback = st.select_slider("🕯️ 初始渲染 K 棒數量", options=[30, 60, 90, 120, 240], value=60)
-    st.caption("設定後，圖表上仍可透過滑鼠拖曳或滾輪自由往前追溯歷史數據。")
-            
-    st.divider()
-    st.header("🌐 雲地通訊設定")
-    new_agent_url = st.text_input("地端 Agent 網址 (Ngrok/IP)", value=st.session_state.agent_url)
-    if new_agent_url != st.session_state.agent_url:
-        st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
-
-    st.divider()
-    st.header("🤖 AI 選股報告分流")
-    if st.button("🚀 生成【台股當沖】報告", use_container_width=True, type="primary"):
-        st.session_state.ai_report_daytrade = fetch_ai_list("daytrade", API_KEY); st.rerun()
-    if st.button("🌙 生成【台股隔日沖】報告", use_container_width=True):
-        st.session_state.ai_report_overnight = fetch_ai_list("overnight", API_KEY); st.rerun()
-    if st.button("🦅 生成【台股波段】報告", use_container_width=True):
-        st.session_state.ai_report_swing = fetch_ai_list("swing", API_KEY); st.rerun()
-    if st.button("🇺🇸 生成【美股專區】報告", use_container_width=True):
-        st.session_state.ai_report_us = fetch_ai_list("us_stocks", API_KEY); st.rerun()
-    
-    st.divider()
-    st.header("🎯 自訂監控加入")
+    # 1. 🎯 自訂監控加入
+    st.header("🎯 1. 自訂監控加入")
     all_stocks = get_full_stock_db()
     if all_stocks: stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
     else: stock_list = ["伺服器連線異常，請使用下方強制加入"]
@@ -592,11 +548,61 @@ with st.sidebar:
     if us_code: 
         if st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}"):
             cb_add_us(us_code, us_code); st.rerun()
-            
-    st.divider()
-    auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
+
     if st.button("🗑️ 徹底清空所有資料", type="secondary"):
         cb_clear_all(); st.rerun()
+
+    st.divider()
+
+    # 2. ⚡ 自動更新
+    st.header("⚡ 2. 系統更新頻率")
+    auto_refresh = st.checkbox("開啟極速自動更新 (3秒)", value=False)
+
+    st.divider()
+
+    # 3. 🤖 AI 選股報告分流
+    st.header("🤖 3. AI 選股報告")
+    if st.button("🚀 生成【台股當沖】報告", use_container_width=True, type="primary"):
+        st.session_state.ai_report_daytrade = fetch_ai_list("daytrade", API_KEY); st.rerun()
+    if st.button("🌙 生成【台股隔日沖】報告", use_container_width=True):
+        st.session_state.ai_report_overnight = fetch_ai_list("overnight", API_KEY); st.rerun()
+    if st.button("🦅 生成【台股波段】報告", use_container_width=True):
+        st.session_state.ai_report_swing = fetch_ai_list("swing", API_KEY); st.rerun()
+    if st.button("🇺🇸 生成【美股專區】報告", use_container_width=True):
+        st.session_state.ai_report_us = fetch_ai_list("us_stocks", API_KEY); st.rerun()
+    
+    st.divider()
+
+    # 4. 🛡️ 終極安控中心 (原第5點)
+    st.header("🛡️ 4. 終極安控中心")
+    if not st.session_state.authenticated:
+        st.warning("🔒 損益與下單功能已鎖定")
+        auth_code = st.text_input("輸入 Google Authenticator 6碼驗證碼", type="password")
+        if st.button("解鎖戰情室", use_container_width=True, type="primary"):
+            totp = pyotp.TOTP(TWO_FA_SECRET)
+            if totp.verify(auth_code):
+                st.session_state.authenticated = True
+                st.success("✅ 身分驗證成功，武器系統已解鎖！")
+                st.rerun()
+            else:
+                st.error("❌ 驗證碼錯誤")
+    else:
+        st.success("🔓 指揮官已登入，火力全開")
+        if st.button("登出並鎖定", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
+
+    st.markdown("##### 🌐 雲地通訊設定")
+    new_agent_url = st.text_input("地端 Agent 網址 (Ngrok/IP)", value=st.session_state.agent_url)
+    if new_agent_url != st.session_state.agent_url:
+        st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
+
+    st.divider()
+
+    # 5. 🤖 API 引擎狀態 (原第6點)
+    st.header("🤖 5. API 引擎狀態")
+    if not API_KEY: st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
+    else: st.success("🟢 API 已連線，AI 引擎運轉中 (金鑰已隱藏)")
 
 # --- 主畫面渲染 ---
 st.title("⚡ AI 雲地混合智能戰情室")
@@ -782,7 +788,7 @@ with tab_tw:
                     if st.button("❌", key=f"del_tw_{code}"):
                         cb_remove_tw(idx); st.rerun()
                 
-                # 🚀 全新 UI：動態橫向標籤 (免展開、免點擊，一目了然)
+                # 🚀 動態橫向標籤：主力足跡 (免展開)
                 if not df_1m.empty:
                     df_m = df_1m.copy()
                     df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
@@ -794,12 +800,11 @@ with tab_tw:
                         df_today['Vol_MA10'] = df_today['Volume'].rolling(10, min_periods=1).mean()
                         avg_vol_day = df_today['Volume'].mean()
                         
-                        # 台股判定條件：大於10分均量2倍，大於日均量1.5倍，且單筆大於50張
                         spike_cond = (df_today['Volume'] > df_today['Vol_MA10'] * 2.0) & (df_today['Volume'] > avg_vol_day * 1.5) & (df_today['Volume'] >= 50000)
                         spikes = df_today[spike_cond].copy()
                         
                         if not spikes.empty:
-                            spikes = spikes.sort_index(ascending=False).head(8) # 顯示最近8筆
+                            spikes = spikes.sort_index(ascending=False).head(8)
                             badges_html = "<div style='display: flex; flex-wrap: wrap; gap: 8px; margin-top: -10px; margin-bottom: 12px;'>"
                             badges_html += "<span style='font-size: 0.9rem; color: #94a3b8; padding-top: 2px;'>🐾 主力足跡:</span>"
                             for _, row in spikes.iterrows():
@@ -846,9 +851,10 @@ with tab_tw:
                 with c_ctrl2: tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_tw_{code}", label_visibility="collapsed")
                 with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
 
+                # 強制使用 60 根作為初始視角，移除 ui_lookback 變數
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1: render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
-                with c_chart2: render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel, lookback=ui_lookback)
+                with c_chart2: render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel, lookback=60)
 
                 st.markdown("---")
                 if st.session_state.authenticated:
@@ -1010,7 +1016,7 @@ with tab_us:
                     if st.button("❌", key=f"del_us_{code}"):
                         cb_remove_us(idx); st.rerun()
                 
-                # 🚀 全新 UI：動態橫向標籤 (美股版，綠漲紅跌)
+                # 🚀 動態橫向標籤：主力足跡 (美股版)
                 if not df_1m_us.empty:
                     df_m = df_1m_us.copy()
                     df_m['Time'] = df_m.index.tz_convert('America/New_York')
@@ -1071,9 +1077,10 @@ with tab_us:
                 with c_ctrl2: tf_sel = st.selectbox("切換時區", ["1K", "5K", "15K", "日K"], index=3, key=f"tf_us_{code}", label_visibility="collapsed")
                 with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
 
+                # 強制使用 60 根作為初始視角，移除 ui_lookback 變數
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1: render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
-                with c_chart2: render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel, lookback=ui_lookback)
+                with c_chart2: render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel, lookback=60)
 
                 st.markdown("---")
                 if st.session_state.authenticated:
