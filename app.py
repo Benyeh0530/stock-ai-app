@@ -438,7 +438,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# 🚀 萬能十字線整合版 K 線圖
+# 🚀 全新升級：全幅雙向十字線 (Crosshair) 整合版 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -491,12 +491,12 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     layers = []
     
-    # 移除原本內建的 tooltip，改由萬能十字線觸發
     if "K棒" in visible_layers:
         rule = base.mark_rule().encode(
             y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q',
             color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
+        # 移除 bar 上的 tooltip，交由十字線統一顯示
         bar = base.mark_bar().encode(
             y='Open:Q', y2='Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
@@ -514,8 +514,8 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     if not layers:
         st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
         return
-    
-    # 🚀 建立萬能十字線與整合 Tooltip
+
+    # 🚀 十字線核心邏輯 (縱線 + 橫線 + 整合 Tooltip)
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
 
     tooltip_data = [
@@ -535,11 +535,18 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         tooltip=tooltip_data
     ).add_params(hover)
 
+    # 垂直虛線
     v_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
+    
+    # 水平虛線 (跟隨收盤價，全幅延伸)
+    h_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+        y='Close:Q',
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+    ).transform_filter(hover)
 
-    layers.extend([hover_points, v_rule])
+    layers.extend([hover_points, v_rule, h_rule])
         
     main_kline = alt.layer(*layers).properties(height=200).add_params(pan_zoom)
 
@@ -548,7 +555,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
     ).properties(height=60)
 
-    # 🚀 靜態面板：直接印出最新均線價格 (不怕滑鼠抓不到)
+    # 🚀 靜態面板：直接印出最新均線價格 (免游標懸停即看)
     def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
     ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
     if "MA3" in visible_layers: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[-1])}</span> &nbsp; "
@@ -746,6 +753,10 @@ with tab_tw:
             curr_p = live_cp if live_cp is not None else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             
+            # 🚀 寫入 5K/15K MA10 供監控防線使用
+            if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
+            if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
+            
             df_daily_rt = df_daily.copy()
             if not df_daily_rt.empty:
                 df_daily_rt.iloc[-1, df_daily_rt.columns.get_loc('Close')] = curr_p
@@ -759,7 +770,7 @@ with tab_tw:
                 r1 = (2 * pivot) - y_low; s1 = (2 * pivot) - y_high
                 cdp = (y_high + y_low + 2 * y_close) / 4
                 cdp_nh = (2 * cdp) - y_low; cdp_nl = (2 * cdp) - y_high
-                mas['CDP(中價)'] = cdp; mas['CDP_NH(壓力)'] = cdp_nh; mas['CDP_NL(支撐)'] = cdp_nl
+                mas['CDP_NH(壓力)'] = cdp_nh; mas['CDP_NL(支撐)'] = cdp_nl
             
             vol_alert_msg = ""; vol_info = ""; is_vol_surge = False 
             if len(df_1m) >= 15:
@@ -840,7 +851,6 @@ with tab_tw:
                     if st.button("❌", key=f"del_tw_{code}"):
                         cb_remove_tw(idx); st.rerun()
                 
-                # 🚀 動態橫向標籤：主力足跡 (免展開)
                 if not df_1m.empty:
                     df_m = df_1m.copy()
                     df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
@@ -942,7 +952,8 @@ with tab_tw:
                     st.markdown("##### 🎯 專屬監控防線")
                     for a_idx, al in enumerate(alerts):
                         c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
-                        opts = ["固定價格", "當日VWAP", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
+                        # 🚀 更新選單：移除 CDP(中價)，加入 5K與15K MA
+                        opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                         current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
                         
                         with c_type:
@@ -1008,6 +1019,10 @@ with tab_us:
                 mas['日線3MA'] = df_daily_rt['Close'].tail(3).mean(); mas['日線5MA'] = df_daily_rt['Close'].tail(5).mean()
                 mas['日線10MA'] = df_daily_rt['Close'].tail(10).mean(); mas['日線23MA'] = df_daily_rt['Close'].tail(23).mean()
             
+            # 🚀 寫入 5K/15K MA10 供監控防線使用
+            if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
+            if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
+
             r1, s1 = 0.0, 0.0
             if len(df_daily) >= 2:
                 y_high, y_low, y_close = df_daily['High'].iloc[-2], df_daily['Low'].iloc[-2], df_daily['Close'].iloc[-2]
@@ -1015,7 +1030,7 @@ with tab_us:
                 r1 = (2 * pivot) - y_low; s1 = (2 * pivot) - y_high
                 cdp = (y_high + y_low + 2 * y_close) / 4
                 cdp_nh = (2 * cdp) - y_low; cdp_nl = (2 * cdp) - y_high
-                mas['CDP(中价)']: cdp; mas['CDP_NH(压力)'] = cdp_nh; mas['CDP_NL(支撑)'] = cdp_nl
+                mas['CDP_NH(壓力)'] = cdp_nh; mas['CDP_NL(支撐)'] = cdp_nl
             
             is_alert = False; triggered_msgs = []
             for a_idx, al in enumerate(alerts):
@@ -1067,7 +1082,6 @@ with tab_us:
                     if st.button("❌", key=f"del_us_{code}"):
                         cb_remove_us(idx); st.rerun()
                 
-                # 🚀 動態橫向標籤：主力足跡 (美股版)
                 if not df_1m_us.empty:
                     df_m = df_1m_us.copy()
                     df_m['Time'] = df_m.index.tz_convert('America/New_York')
@@ -1166,7 +1180,7 @@ with tab_us:
                     st.markdown("##### 🎯 專屬監控防線")
                     for a_idx, al in enumerate(alerts):
                         c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
-                        opts = ["固定價格", "當日VWAP", "CDP(中價)", "CDP_NH(壓力)", "CDP_NL(支撐)"]
+                        opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                         current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
                         
                         with c_type:
