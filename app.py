@@ -79,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
+# --- 1. 引擎與雲地通訊設定 ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if API_KEY:
@@ -164,7 +164,10 @@ def cb_add_us(code, name, target_price=0.0, condition=">="):
 def cb_remove_tw(idx): st.session_state.tw_stocks.pop(idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 def cb_clear_all():
-    st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_dt = None; st.session_state.ai_report_swing = None; save_watchlist([], [])
+    st.session_state.tw_stocks = []; st.session_state.us_stocks = []
+    st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None
+    st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None
+    save_watchlist([], [])
 
 if 'initialized' not in st.session_state:
     data = load_watchlist()
@@ -176,13 +179,18 @@ if 'initialized' not in st.session_state:
             for al in s['alerts']:
                 if 'touch_2_triggered' not in al: al['touch_2_triggered'] = False
                 if 'type' not in al: al['type'] = "固定價格"
-    st.session_state.ai_report_dt = None
+    
+    # 🚀 初始化 4 大報告變數
+    st.session_state.ai_report_daytrade = None
+    st.session_state.ai_report_overnight = None
     st.session_state.ai_report_swing = None
+    st.session_state.ai_report_us = None
+    
     st.session_state.core_assets = [{"code": "0050", "is_us": False}, {"code": "009816", "is_us": False}, {"code": "QQQM", "is_us": True}]
     if 'market_alert_flags' not in st.session_state: st.session_state.market_alert_flags = {}
     st.session_state.initialized = True
 
-# --- 2. 數據引擎 (🚀 效能優化：全面套用快取機制) ---
+# --- 2. 數據引擎 ---
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
@@ -271,7 +279,6 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-# 🚀 效能優化 1：為 1分K 加上快取，避免每次點擊按鈕都重新發送 N 次 API 請求
 @st.cache_data(ttl=15, show_spinner=False)
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
@@ -284,7 +291,6 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 效能優化 2：為大宗報價加上快取，支援 Tuple 格式加速 Hashing
 @st.cache_data(ttl=10, show_spinner=False)
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
@@ -328,12 +334,21 @@ def get_single_live_price(code, is_us=False):
         except: pass
     return None, None
 
+# 🚀 AI 報告 4 大主題精準 Prompt 設計
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
-    if report_type == "daytrade": prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空標的。找尋高波動活躍股。嚴格限制只輸出JSON。JSON: {{ '台股當沖作多': [], '台股當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
-    else: prompt = f"時間 {now}。你是跨國波段操盤手。提供5檔美股短波、5檔台股資金熱點。嚴格限制只輸出JSON。JSON: {{ '美股短波分析': [], '資金熱點TOP5': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+    
+    if report_type == "daytrade": 
+        prompt = f"時間 {now}。你是台股當沖高手。提供5檔作多、5檔作空的台股標的。找尋高波動活躍股。嚴格限制只輸出JSON。JSON: {{ '當沖作多': [], '當沖作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+    elif report_type == "overnight":
+        prompt = f"時間 {now}。你是台股隔日沖高手。提供5檔隔日沖台股標的。尋找尾盤強勢、籌碼集中的標的。嚴格限制只輸出JSON。JSON: {{ '隔日沖潛力股': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+    elif report_type == "swing":
+        prompt = f"時間 {now}。你是台股波段操盤手。提供5檔短波段/波段台股標的。尋找具備題材與技術面剛突破的標的。嚴格限制只輸出JSON。JSON: {{ '台股波段推薦': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+    else: # us_stocks
+        prompt = f"時間 {now}。你是美股操盤手。提供5檔強勢作多、5檔弱勢作空的美股波段標的。嚴格限制只輸出JSON。JSON: {{ '美股作多': [], '美股作空': [] }} (格式：{{'code': '代碼', 'name': '名稱', 'strategy': '純白話文理由'}})"
+        
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
         cleaned_response = response.replace("```json", "").replace("```", "").strip()
@@ -371,7 +386,6 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 # --- 📊 視覺圖表引擎 ---
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
-    
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
     chart_df['Time'] = chart_df.index.tz_convert(tz_str)
@@ -389,7 +403,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if chart_df.empty: return
 
     color_domain = ['現價']; color_range = ['#3b82f6']
-
     if 'VWAP' in df_1m.columns:
         vwap_clean = df_1m['VWAP'].replace(0, np.nan).bfill().fillna(df_1m['Close'])
         chart_df['當日VWAP(均線)'] = vwap_clean.loc[chart_df.index]
@@ -540,10 +553,8 @@ with st.sidebar:
 
     st.divider()
     st.header("🤖 AI 引擎狀態")
-    if not API_KEY:
-        st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
-    else:
-        st.success("🟢 API 已連線，AI 引擎運轉中 (金鑰已隱藏)")
+    if not API_KEY: st.error("🔴 API 未設定 (AI 相關功能已停擺)\n\n請至 Streamlit Cloud 後台 Secrets 頁面設定 `GEMINI_API_KEY`")
+    else: st.success("🟢 API 已連線，AI 引擎運轉中 (金鑰已隱藏)")
 
     st.divider()
     st.header("⚙️ 圖表視角設定")
@@ -554,15 +565,19 @@ with st.sidebar:
     st.header("🌐 雲地通訊設定")
     new_agent_url = st.text_input("地端 Agent 網址 (Ngrok/IP)", value=st.session_state.agent_url)
     if new_agent_url != st.session_state.agent_url:
-        st.session_state.agent_url = new_agent_url
-        st.toast("✅ Agent 連線網址已更新")
+        st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
 
     st.divider()
-    st.header("🤖 選股報告分流")
-    if st.button("🚀 生成【當沖短線】報告", use_container_width=True, type="primary"):
-        st.session_state.ai_report_dt = fetch_ai_list("daytrade", API_KEY)
-    if st.button("🦅 生成【波段熱點】報告", use_container_width=True):
-        st.session_state.ai_report_swing = fetch_ai_list("swing", API_KEY)
+    # 🚀 AI 選股四大主題按鈕
+    st.header("🤖 AI 選股報告分流")
+    if st.button("🚀 生成【台股當沖】報告", use_container_width=True, type="primary"):
+        st.session_state.ai_report_daytrade = fetch_ai_list("daytrade", API_KEY); st.rerun()
+    if st.button("🌙 生成【台股隔日沖】報告", use_container_width=True):
+        st.session_state.ai_report_overnight = fetch_ai_list("overnight", API_KEY); st.rerun()
+    if st.button("🦅 生成【台股波段】報告", use_container_width=True):
+        st.session_state.ai_report_swing = fetch_ai_list("swing", API_KEY); st.rerun()
+    if st.button("🇺🇸 生成【美股專區】報告", use_container_width=True):
+        st.session_state.ai_report_us = fetch_ai_list("us_stocks", API_KEY); st.rerun()
     
     st.divider()
     st.header("🎯 自訂監控加入")
@@ -574,56 +589,24 @@ with st.sidebar:
     if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
         parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
         if st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}"):
-            cb_add_tw(code, name)
-            st.rerun()
+            cb_add_tw(code, name); st.rerun()
 
     with st.expander("🛠️ 找不到？手動強制加入"):
         tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
             if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
-                cb_add_tw(tw_code, tw_name)
-                st.rerun()
+                cb_add_tw(tw_code, tw_name); st.rerun()
 
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if us_code: 
         if st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}"):
-            cb_add_us(us_code, us_code)
-            st.rerun()
+            cb_add_us(us_code, us_code); st.rerun()
             
     st.divider()
     auto_refresh = st.checkbox("⚡ 開啟極速自動更新 (3秒)", value=False)
     if st.button("🗑️ 徹底清空所有資料", type="secondary"):
-        cb_clear_all()
-        st.rerun()
-
-# --- AI 報告渲染 ---
-for report in [st.session_state.ai_report_dt, st.session_state.ai_report_swing]:
-    if report:
-        with st.container(border=True):
-            tabs = st.tabs(list(report.keys()))
-            for i, (cat, stocks) in enumerate(report.items()):
-                with tabs[i]:
-                    for s in stocks:
-                        c_p_t = get_bulk_spark_prices(tuple([s['code']] if "台股" in cat or "資金" in cat else []), tuple([s['code']] if "美股" in cat else []))
-                        c_p = c_p_t.get(s['code'], (None, None))[0]
-                        if c_p is None: c_p, _ = get_single_live_price(s['code'], "美股" in cat)
-                        
-                        target = 0; cond = ">="
-                        if c_p:
-                            if "空" in cat: target = round(c_p * 0.985, 2); cond = "<="
-                            elif "多" in cat: target = round(c_p * 1.015, 2)
-                            else: target = round(c_p * 1.05, 2)
-                        
-                        with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 目標價: {target}"):
-                            st.write(f"**策略理由**：{s.get('strategy', '')}")
-                            btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
-                            if "美股" in cat: 
-                                if st.button(btn_txt, key=f"btn_u_{s['code']}_{target}"):
-                                    cb_add_us(s['code'], s['name'], target, cond); st.rerun()
-                            else: 
-                                if st.button(btn_txt, key=f"btn_t_{s['code']}_{target}"):
-                                    cb_add_tw(s['code'], s['name'], target, cond); st.rerun()
+        cb_clear_all(); st.rerun()
 
 # --- 主畫面渲染 ---
 st.title("⚡ AI 雲地混合智能戰情室")
@@ -633,7 +616,6 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-# 🚀 效能優化 3：利用 Tuple 確保快取 Hash 正常運作
 all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
 us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
 all_us_to_fetch = tuple(us_set)
@@ -687,13 +669,14 @@ if twii_cp and twii_mas:
     
     st.divider()
 
-tab_tw, tab_us, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🐢 10年期核心長線"])
+# 🚀 將主畫面一分為四，AI 報告擁有獨立大頁籤！
+tab_tw, tab_us, tab_ai, tab_core = st.tabs(["🇹🇼 台股極速當沖", "🇺🇸 美股波段戰情", "🤖 AI 選股報告", "🐢 10年期核心長線"])
 
 # ====================
 # 戰區 1：台股極速當沖
 # ====================
 with tab_tw:
-    if not st.session_state.tw_stocks: st.info("請加入台股。")
+    if not st.session_state.tw_stocks: st.info("請至側邊欄加入台股標的。")
     for idx, stock in enumerate(st.session_state.tw_stocks):
         code, name = stock['code'], stock['name']
         alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '') 
@@ -808,8 +791,7 @@ with tab_tw:
                 with c_s1: st.metric("支撐(S1)", f"{s1:.2f}", delta_color="off")
                 with c_del: 
                     if st.button("❌", key=f"del_tw_{code}"):
-                        cb_remove_tw(idx)
-                        st.rerun()
+                        cb_remove_tw(idx); st.rerun()
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
                 if vol_alert_msg: st.warning(f"📊 **動能偵測**：{vol_alert_msg} ({vol_info})")
@@ -844,10 +826,8 @@ with tab_tw:
                 with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
 
                 c_chart1, c_chart2 = st.columns(2)
-                with c_chart1:
-                    render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
-                with c_chart2:
-                    render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel, lookback=ui_lookback)
+                with c_chart1: render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
+                with c_chart2: render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel, lookback=ui_lookback)
 
                 st.markdown("---")
                 if st.session_state.authenticated:
@@ -876,10 +856,7 @@ with tab_tw:
                         with c_pos4: new_lots = st.number_input("張數", value=my_l, min_value=1, step=1, key=f"my_l_tw_{code}")
                         
                         if new_trade_type != my_tt or new_dir != my_dir or new_price != my_p or new_lots != my_l:
-                            st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type
-                            st.session_state.tw_stocks[idx]['my_dir'] = new_dir
-                            st.session_state.tw_stocks[idx]['my_price'] = new_price
-                            st.session_state.tw_stocks[idx]['my_lots'] = new_lots
+                            st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type; st.session_state.tw_stocks[idx]['my_dir'] = new_dir; st.session_state.tw_stocks[idx]['my_price'] = new_price; st.session_state.tw_stocks[idx]['my_lots'] = new_lots
                             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
                     else: st.warning("🔒 請先通過 2FA 雙因子認證才能修改機密部位參數。")
 
@@ -926,7 +903,7 @@ with tab_tw:
 # 戰區 2：美股波段戰情
 # ====================
 with tab_us:
-    if not st.session_state.us_stocks: st.info("請加入美股。")
+    if not st.session_state.us_stocks: st.info("請至側邊欄加入美股標的。")
     for idx, stock in enumerate(st.session_state.us_stocks):
         code = stock['code']; alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '')
         
@@ -1010,8 +987,7 @@ with tab_us:
                 with c_s1: st.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
                 with c_del: 
                     if st.button("❌", key=f"del_us_{code}"):
-                        cb_remove_us(idx)
-                        st.rerun()
+                        cb_remove_us(idx); st.rerun()
                 
                 if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
                 if ai_advice: st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{ai_advice}</div>", unsafe_allow_html=True)
@@ -1044,10 +1020,8 @@ with tab_us:
                 with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
 
                 c_chart1, c_chart2 = st.columns(2)
-                with c_chart1:
-                    render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
-                with c_chart2:
-                    render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel, lookback=ui_lookback)
+                with c_chart1: render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
+                with c_chart2: render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel, lookback=ui_lookback)
 
                 st.markdown("---")
                 if st.session_state.authenticated:
@@ -1119,7 +1093,52 @@ with tab_us:
                                 except: pass
 
 # ====================
-# 戰區 3：10年核心資產
+# 戰區 3：🤖 AI 選股報告中心 (🚀 全新獨立頁籤)
+# ====================
+with tab_ai:
+    st.markdown("### 🤖 跨海智能 AI 選股報告中心")
+    st.caption("💡 點擊下方對應的頁籤切換不同策略報告。若無資料，請至左側邊欄點擊對應的「生成」按鈕。")
+    
+    ai_tabs = st.tabs(["🚀 台股當沖", "🌙 台股隔日沖", "🦅 台股波段", "🇺🇸 美股專區"])
+    
+    reports_mapping = [
+        (ai_tabs[0], st.session_state.ai_report_daytrade, "台股"),
+        (ai_tabs[1], st.session_state.ai_report_overnight, "台股"),
+        (ai_tabs[2], st.session_state.ai_report_swing, "台股"),
+        (ai_tabs[3], st.session_state.ai_report_us, "美股")
+    ]
+    
+    for tab, report, market_type in reports_mapping:
+        with tab:
+            if not report:
+                st.info("尚無報告，請至左側邊欄點選生成對應的策略報告。")
+            else:
+                sub_tabs = st.tabs(list(report.keys()))
+                for i, (cat, stocks) in enumerate(report.items()):
+                    with sub_tabs[i]:
+                        for s in stocks:
+                            c_p_t = get_bulk_spark_prices(tuple([s['code']] if market_type == "台股" else []), tuple([s['code']] if market_type == "美股" else []))
+                            c_p = c_p_t.get(s['code'], (None, None))[0]
+                            if c_p is None: c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"))
+                            
+                            target = 0; cond = ">="
+                            if c_p:
+                                if "空" in cat: target = round(c_p * 0.985, 2); cond = "<="
+                                elif "多" in cat: target = round(c_p * 1.015, 2)
+                                else: target = round(c_p * 1.05, 2)
+                            
+                            with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 建議目標價: {target}"):
+                                st.write(f"**策略理由**：{s.get('strategy', '')}")
+                                btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
+                                if market_type == "美股": 
+                                    if st.button(btn_txt, key=f"btn_u_{s['code']}_{target}_{cat}"):
+                                        cb_add_us(s['code'], s['name'], target, cond); st.rerun()
+                                else: 
+                                    if st.button(btn_txt, key=f"btn_t_{s['code']}_{target}_{cat}"):
+                                        cb_add_tw(s['code'], s['name'], target, cond); st.rerun()
+
+# ====================
+# 戰區 4：10年核心資產
 # ====================
 with tab_core:
     st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫")
