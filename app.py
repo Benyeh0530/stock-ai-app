@@ -237,54 +237,56 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 終極無敵雙層備援機制 (Dual-Layer Fallback)：數據流解耦與降維打擊
+# 🚀 終極防彈數據引擎：拒絕使用 bug 百出的 /v7/quote，我們自己算昨收價！
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
-    df = pd.DataFrame()
-    q_curr = q_prev = None
+    df_spark = pd.DataFrame()
+    curr_p = prev_p = None
     
-    # 資料流 1：解耦的大盤實時 Quote (解決昨收價 STALE 問題)
+    # 第一階段：抓取日 K 線 (1d)。這是唯一能保證「昨收價」絕對準確的方法
     try:
-        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
-        q_res = requests.get(q_url, headers=headers, timeout=2).json()
-        res_list = q_res.get('quoteResponse', {}).get('result', [])
-        if res_list:
-            q_curr = res_list[0].get('regularMarketPrice')
-            q_prev = res_list[0].get('regularMarketPreviousClose')
+        url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d&_t={int(time.time())}"
+        res_1d = requests.get(url_1d, headers=headers, timeout=3).json()
+        res_data = res_1d.get('chart', {}).get('result', [])[0]
+        closes = res_data['indicators']['quote'][0]['close']
+        valid_closes = [c for c in closes if c is not None]
+        
+        if len(valid_closes) >= 2:
+            curr_p = valid_closes[-1] # 最新價
+            prev_p = valid_closes[-2] # 真正的昨收價
+        elif len(valid_closes) == 1:
+            curr_p = valid_closes[0]
+            prev_p = valid_closes[0]
     except: pass
-    
-    # 資料流 2：解耦的 Trend Chart K 線 (解決Null斷訊與畫圖 STALE 問題)
-    intervals_to_try = [('1m', '2y'), ('5m', '5y'), ('1d', '20y')]
-    for interval, rng in intervals_to_try:
+
+    # 第二階段：抓取分 K 線畫走勢圖 (降維打擊：1m 失效就用 5m、15m)
+    for interval in ['1m', '5m', '15m']:
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}&_t={int(time.time())}"
-            res = requests.get(url, headers=headers, timeout=2).json()
-            result = res.get('chart', {}).get('result', [])
-            if result:
-                meta = result[0].get('meta', {})
-                timestamp = result[0].get('timestamp')
-                if timestamp:
-                    close = result[0]['indicators']['quote'][0]['close']
-                    idx = pd.to_datetime(timestamp, unit='s', utc=True)
-                    df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
+            url_intra = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range=5d&_t={int(time.time())}"
+            res_intra = requests.get(url_intra, headers=headers, timeout=2).json()
+            res_data = res_intra.get('chart', {}).get('result', [])[0]
+            timestamp = res_data.get('timestamp')
+            close = res_data['indicators']['quote'][0]['close']
+            
+            if timestamp and close:
+                idx = pd.to_datetime(timestamp, unit='s', utc=True)
+                df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
+                
+                if not df_all.empty:
+                    # 只截取最後一個真實有交易的日期，避免畫出死魚線
+                    df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
+                    last_date = df_all['Date'].iloc[-1]
+                    df_spark = df_all[df_all['Date'] == last_date].copy()
+                    df_spark.drop(columns=['Date'], inplace=True)
                     
-                    if not df_all.empty:
-                        df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
-                        last_date = df_all['Date'].iloc[-1]
-                        df = df_all[df_all['Date'] == last_date].copy()
-                        df.drop(columns=['Date'], inplace=True)
-                        break # Fallback chain 成功，跳出迴圈
+                    # 確保現價為當日最即時的價格
+                    if not df_spark.empty:
+                        curr_p = df_spark['Close'].iloc[-1]
+                    break # 成功拿到圖表資料，立刻跳出迴圈
         except: continue
 
-    # 數據融合 (Fusion)
-    # 1. 保證實時Quote不為Null
-    if q_curr is None and not df.empty: q_curr = df['Close'].iloc[-1]
-    
-    # 2. 保證昨收Quote不為Null ( fallback to chart's stale prevClose if truly missing)
-    if q_prev is None and result and meta: q_prev = meta.get('chartPreviousClose', meta.get('previousClose', q_curr))
-    
-    return df, q_curr, q_prev
+    return df_spark, curr_p, prev_p
 
 @st.cache_data(ttl=300)
 def get_index_mas(code='^TWII'):
@@ -385,13 +387,15 @@ def get_single_live_price(code, is_us, cache_buster):
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suf in suffixes:
         try:
-            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}&_t={int(time.time())}"
-            res = requests.get(url, headers=headers, timeout=2).json()
-            res_list = res.get('quoteResponse', {}).get('result', [])
-            if res_list:
-                cp = res_list[0].get('regularMarketPrice')
-                pp = res_list[0].get('regularMarketPreviousClose', cp)
-                if cp is not None: return cp, pp
+            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suf}?interval=1d&range=5d&_t={int(time.time())}"
+            res_1d = requests.get(url_1d, headers=headers, timeout=2).json()
+            res_data = res_1d.get('chart', {}).get('result', [])[0]
+            closes = res_data['indicators']['quote'][0]['close']
+            valid_closes = [c for c in closes if c is not None]
+            if len(valid_closes) >= 2:
+                return valid_closes[-1], valid_closes[-2]
+            elif len(valid_closes) == 1:
+                return valid_closes[0], valid_closes[0]
         except: pass
     return None, None
 
@@ -460,8 +464,12 @@ def render_index_sparkline(df, prev_close):
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
-    y_min = min(df_chart['Close'].min(), prev_close) * 0.9995
-    y_max = max(df_chart['Close'].max(), prev_close) * 1.0005
+    # 加入微小緩衝區，確保線條不會被畫布切斷
+    y_min = min(df_chart['Close'].min(), prev_close)
+    y_max = max(df_chart['Close'].max(), prev_close)
+    buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
+    y_min -= buffer
+    y_max += buffer
     
     base = alt.Chart(df_chart).encode(
         x=alt.X('x_idx:Q', axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
@@ -793,7 +801,6 @@ live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_c
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-# 🚀 終極備援引擎啟動：解耦資料抓取
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
 df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
 _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
@@ -1187,7 +1194,7 @@ with tab_us:
             r1 = (2 * pivot) - y_low; s1 = (2 * pivot) - y_high
             cdp = (y_high + y_low + 2 * y_close) / 4
             cdp_nh = (2 * cdp) - y_low; cdp_nl = (2 * cdp) - y_high
-            mas['CDP_NH(压力)'] = cdp_nh; mas['CDP_NL(支撑)'] = cdp_nl
+            mas['CDP_NH(壓力)'] = cdp_nh; mas['CDP_NL(支撐)'] = cdp_nl
         
         is_alert = False; triggered_msgs = []
         for a_idx, al in enumerate(alerts):
