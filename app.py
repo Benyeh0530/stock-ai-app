@@ -237,14 +237,14 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 雙層備援機制 (Dual-Layer Fallback)：確保不管 K 線壞不壞，報價一定出得來！
+# 🚀 終極無敵雙層備援：解決櫃買指數斷訊問題
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_realtime_data(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df = pd.DataFrame()
     cp = pp = None
     
-    # 第 1 層：先去最穩定的 Quote API 把價格與漲跌抓出來，保證畫面上一定有數字
+    # 裝甲第 1 層：保證拿到絕對的現價與昨收 (解決走勢圖掛掉時數字跟著消失的問題)
     try:
         q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
         q_res = requests.get(q_url, headers=headers, timeout=2).json()
@@ -254,25 +254,34 @@ def get_index_realtime_data(symbol, cache_buster):
             pp = res_list[0].get('regularMarketPreviousClose')
     except: pass
     
-    # 第 2 層：再去 Chart API 嘗試抓取 1 分鐘 K 線，用來畫走勢圖
-    try:
-        c_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&_t={int(time.time())}"
-        c_res = requests.get(c_url, headers=headers, timeout=2).json()
-        result = c_res.get('chart', {}).get('result', [])
-        if result:
-            meta = result[0].get('meta', {})
-            if cp is None: cp = meta.get('regularMarketPrice')
-            if pp is None: pp = meta.get('chartPreviousClose', meta.get('previousClose'))
-            
-            timestamp = result[0].get('timestamp')
-            if timestamp: # Yahoo 有時候會偷懶不回傳 timestamp
-                close = result[0]['indicators']['quote'][0]['close']
-                idx = pd.to_datetime(timestamp, unit='s', utc=True)
-                df = pd.DataFrame({'Close': close}, index=idx).dropna()
-                if not df.empty and cp is None:
-                    cp = df['Close'].iloc[-1]
-    except: pass
-    
+    # 裝甲第 2 層：降維打擊。嘗試抓 1m，若 Yahoo 耍脾氣則秒切換抓 5m，確保有線圖可畫
+    for interval in ['1m', '5m']:
+        try:
+            # 擴大到 5d，自動過濾掉週末或盤後空窗期
+            c_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range=5d&_t={int(time.time())}"
+            c_res = requests.get(c_url, headers=headers, timeout=2).json()
+            result = c_res.get('chart', {}).get('result', [])
+            if result:
+                meta = result[0].get('meta', {})
+                if cp is None: cp = meta.get('regularMarketPrice')
+                if pp is None: pp = meta.get('chartPreviousClose', meta.get('previousClose'))
+                
+                timestamp = result[0].get('timestamp')
+                if timestamp:
+                    close = result[0]['indicators']['quote'][0]['close']
+                    idx = pd.to_datetime(timestamp, unit='s', utc=True)
+                    df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
+                    
+                    if not df_all.empty:
+                        # 攔截最後一個真實存在的交易日
+                        df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
+                        last_date = df_all['Date'].iloc[-1]
+                        df = df_all[df_all['Date'] == last_date].copy()
+                        df.drop(columns=['Date'], inplace=True)
+                        if cp is None: cp = df['Close'].iloc[-1]
+                        break # 只要抓到任何一個維度有資料，立刻跳出迴圈
+        except: pass
+        
     return df, cp, pp
 
 @st.cache_data(ttl=300)
@@ -443,14 +452,14 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 def render_index_sparkline(df, prev_close):
     if df.empty or prev_close is None: return
-    df_chart = df.tail(270).copy()
+    df_chart = df.copy()
     df_chart['x_idx'] = np.arange(len(df_chart))
     
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
-    y_min = df_chart['Close'].min() * 0.9995
-    y_max = df_chart['Close'].max() * 1.0005
+    y_min = min(df_chart['Close'].min(), prev_close) * 0.9995
+    y_max = max(df_chart['Close'].max(), prev_close) * 1.0005
     
     base = alt.Chart(df_chart).encode(
         x=alt.X('x_idx:Q', axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
@@ -1109,8 +1118,6 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"): st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復 AI 算價破版 Bug：改為攔截式運算再重繪
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_{code}"):
@@ -1137,6 +1144,7 @@ with tab_us:
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         
         if not df_1m_us.empty:
+            curr_p = df_1m_us['Close'].iloc[-1]
             df_1m_us['Typical_Price'] = (df_1m_us['High'] + df_1m_us['Low'] + df_1m_us['Close']) / 3
             df_1m_us['PV'] = df_1m_us['Typical_Price'] * df_1m_us['Volume']
             df_1m_us['Date'] = df_1m_us.index.tz_convert('America/New_York').date
@@ -1346,8 +1354,6 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復 AI 算價破版 Bug：改回主執行緒攔截式
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
