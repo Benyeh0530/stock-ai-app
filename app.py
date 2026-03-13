@@ -237,26 +237,43 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 三大指數即時資料引擎
+# 🚀 雙層備援機制 (Dual-Layer Fallback)：確保不管 K 線壞不壞，報價一定出得來！
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_realtime_data(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
+    df = pd.DataFrame()
+    cp = pp = None
+    
+    # 第 1 層：先去最穩定的 Quote API 把價格與漲跌抓出來，保證畫面上一定有數字
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=2d&_t={int(time.time())}"
-        res = requests.get(url, headers=headers, timeout=3).json()
-        meta = res['chart']['result'][0]['meta']
-        prev_close = meta.get('chartPreviousClose', meta.get('previousClose'))
-        
-        timestamp = res['chart']['result'][0]['timestamp']
-        close = res['chart']['result'][0]['indicators']['quote'][0]['close']
-        
-        idx = pd.to_datetime(timestamp, unit='s', utc=True)
-        df = pd.DataFrame({'Close': close}, index=idx).dropna()
-        
-        curr_price = df['Close'].iloc[-1] if not df.empty else meta.get('regularMarketPrice')
-        return df, curr_price, prev_close
-    except:
-        return pd.DataFrame(), None, None
+        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
+        q_res = requests.get(q_url, headers=headers, timeout=2).json()
+        res_list = q_res.get('quoteResponse', {}).get('result', [])
+        if res_list:
+            cp = res_list[0].get('regularMarketPrice')
+            pp = res_list[0].get('regularMarketPreviousClose')
+    except: pass
+    
+    # 第 2 層：再去 Chart API 嘗試抓取 1 分鐘 K 線，用來畫走勢圖
+    try:
+        c_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&_t={int(time.time())}"
+        c_res = requests.get(c_url, headers=headers, timeout=2).json()
+        result = c_res.get('chart', {}).get('result', [])
+        if result:
+            meta = result[0].get('meta', {})
+            if cp is None: cp = meta.get('regularMarketPrice')
+            if pp is None: pp = meta.get('chartPreviousClose', meta.get('previousClose'))
+            
+            timestamp = result[0].get('timestamp')
+            if timestamp: # Yahoo 有時候會偷懶不回傳 timestamp
+                close = result[0]['indicators']['quote'][0]['close']
+                idx = pd.to_datetime(timestamp, unit='s', utc=True)
+                df = pd.DataFrame({'Close': close}, index=idx).dropna()
+                if not df.empty and cp is None:
+                    cp = df['Close'].iloc[-1]
+    except: pass
+    
+    return df, cp, pp
 
 @st.cache_data(ttl=300)
 def get_index_mas(code='^TWII'):
@@ -426,7 +443,6 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 def render_index_sparkline(df, prev_close):
     if df.empty or prev_close is None: return
-    # 暴力攔截最後 270 根 K 棒 (約 4.5 小時開盤時間)，徹底無視時區偏移
     df_chart = df.tail(270).copy()
     df_chart['x_idx'] = np.arange(len(df_chart))
     
@@ -771,24 +787,29 @@ df_twoii, cp_twoii, pp_twoii = get_index_realtime_data('^TWOII', fast_cache_key)
 _, cp_ixic, pp_ixic = get_index_realtime_data('^IXIC', fast_cache_key)
 
 with col_t1:
-    if cp_twii and pp_twii:
+    if cp_twii is not None and pp_twii is not None:
         diff = cp_twii - pp_twii
         pct = diff / pp_twii * 100
         st.metric("🇹🇼 加權指數 (上市)", f"{cp_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
-        render_index_sparkline(df_twii, pp_twii)
+        if not df_twii.empty: render_index_sparkline(df_twii, pp_twii)
+        else: st.caption("走勢圖暫無資料")
+    else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
 
 with col_t2:
-    if cp_twoii and pp_twoii:
+    if cp_twoii is not None and pp_twoii is not None:
         diff = cp_twoii - pp_twoii
         pct = diff / pp_twoii * 100
         st.metric("🇹🇼 櫃買指數 (上櫃)", f"{cp_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
-        render_index_sparkline(df_twoii, pp_twoii)
+        if not df_twoii.empty: render_index_sparkline(df_twoii, pp_twoii)
+        else: st.caption("走勢圖暫無資料")
+    else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
 
 with col_t3:
-    if cp_ixic and pp_ixic:
+    if cp_ixic is not None and pp_ixic is not None:
         diff = cp_ixic - pp_ixic
         pct = diff / pp_ixic * 100
         st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{cp_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
+    else: st.metric("🇺🇸 納斯達克 (Nasdaq)", "讀取中...", "--")
 
 with col_t4:
     if API_KEY: st.success(f"⚡ 實時跳動中\n\n更新: {now_tpe.strftime('%H:%M:%S')}")
@@ -1088,6 +1109,8 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"): st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
+                
+                # 🚀 終極修復 AI 算價破版 Bug：改為攔截式運算再重繪
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_{code}"):
@@ -1323,6 +1346,8 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
+                
+                # 🚀 終極修復 AI 算價破版 Bug：改回主執行緒攔截式
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
