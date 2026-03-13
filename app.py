@@ -237,53 +237,53 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 終極防彈數據引擎：我們自己拿日K算昨收價，絕對不被 Yahoo 假數據騙！
+# 🚀 終極防彈版大盤引擎：報價與畫圖完全解耦，確保 +1289 與讀取中不再發生！
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
     curr_p = prev_p = None
     
-    # 第一階段：抓取過去 5 天的日 K 線 (1d)。這是唯一能保證「昨收價」絕對準確的方法
+    # 🛡️ 裝甲第一層：使用最高穩定度的 /v7/quote 專門抓取「現價」與「昨收價」
     try:
-        url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d&_t={int(time.time())}"
-        res_1d = requests.get(url_1d, headers=headers, timeout=3).json()
-        res_data = res_1d.get('chart', {}).get('result', [])[0]
-        closes = res_data['indicators']['quote'][0]['close']
-        valid_closes = [c for c in closes if c is not None]
-        
-        if len(valid_closes) >= 2:
-            curr_p = valid_closes[-1] # 今天的最新價
-            prev_p = valid_closes[-2] # 真正的昨收價
-        elif len(valid_closes) == 1:
-            curr_p = valid_closes[0]
-            prev_p = valid_closes[0]
+        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+        q_res = requests.get(q_url, headers=headers, timeout=2).json()
+        res_list = q_res.get('quoteResponse', {}).get('result', [])
+        if res_list:
+            curr_p = res_list[0].get('regularMarketPrice')
+            prev_p = res_list[0].get('regularMarketPreviousClose')
     except: pass
-
-    # 第二階段：抓取分 K 線畫走勢圖 (降維打擊：1m 失效就自動降級用 5m)
-    for interval in ['1m', '5m', '15m']:
+    
+    # 🛡️ 裝甲第二層：抓取分 K 線用來畫圖。如果 1m 失效，自動降級抓 5m、15m、甚至日K！
+    intervals_to_try = [('1m', '5d'), ('5m', '5d'), ('15m', '5d'), ('1d', '5d')]
+    for interval, rng in intervals_to_try:
         try:
-            url_intra = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range=5d&_t={int(time.time())}"
-            res_intra = requests.get(url_intra, headers=headers, timeout=2).json()
-            res_data = res_intra.get('chart', {}).get('result', [])[0]
-            timestamp = res_data.get('timestamp')
-            close = res_data['indicators']['quote'][0]['close']
+            c_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}"
+            c_res = requests.get(c_url, headers=headers, timeout=2).json()
+            result = c_res.get('chart', {}).get('result', [])
             
-            if timestamp and close:
-                idx = pd.to_datetime(timestamp, unit='s', utc=True)
-                df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
+            if result:
+                # 如果第一層的 quote 壞了，這理還能當備胎提供現價與昨收
+                if curr_p is None: curr_p = result[0].get('meta', {}).get('regularMarketPrice')
+                if prev_p is None: prev_p = result[0].get('meta', {}).get('chartPreviousClose', result[0].get('meta', {}).get('previousClose'))
                 
-                if not df_all.empty:
-                    # 只截取最後一個真實有交易的日期，避免畫出死魚線或被時差切斷
-                    df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
-                    last_date = df_all['Date'].iloc[-1]
-                    df_spark = df_all[df_all['Date'] == last_date].copy()
-                    df_spark.drop(columns=['Date'], inplace=True)
+                timestamp = result[0].get('timestamp')
+                close = result[0].get('indicators', {}).get('quote', [{}])[0].get('close')
+                
+                if timestamp and close:
+                    idx = pd.to_datetime(timestamp, unit='s', utc=True)
+                    df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
                     
-                    # 確保現價為當日最即時的價格
-                    if not df_spark.empty:
-                        curr_p = df_spark['Close'].iloc[-1]
-                    break # 成功拿到圖表資料，立刻跳出迴圈
+                    if not df_all.empty:
+                        if interval != '1d':
+                            # 只截取最後一個交易日的資料來畫漂亮的走勢圖
+                            df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
+                            last_date = df_all['Date'].iloc[-1]
+                            df_spark = df_all[df_all['Date'] == last_date].copy()
+                            df_spark.drop(columns=['Date'], inplace=True)
+                        else:
+                            df_spark = df_all.copy()
+                        break # 成功拿到資料，立即跳出降級迴圈
         except: continue
 
     return df_spark, curr_p, prev_p
@@ -346,7 +346,7 @@ def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d&_t={int(time.time())}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
         res_1m = requests.get(url, headers=headers, timeout=3).json()
         idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
         q = res_1m['chart']['result'][0]['indicators']['quote'][0]
@@ -366,7 +366,7 @@ def get_bulk_spark_prices(tw_codes, us_codes, cache_buster):
         chunk = symbols[i:i + chunk_size]
         sym_str = ",".join(chunk)
         try:
-            url = f"https://query2.finance.yahoo.com/v8/finance/spark?symbols={sym_str}&range=1d&_t={int(time.time())}"
+            url = f"https://query2.finance.yahoo.com/v8/finance/spark?symbols={sym_str}&range=1d"
             res = requests.get(url, headers=headers, timeout=5).json()
             results = res.get('spark', {}).get('result', [])
             for r in results:
@@ -387,15 +387,13 @@ def get_single_live_price(code, is_us, cache_buster):
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suf in suffixes:
         try:
-            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suf}?interval=1d&range=5d&_t={int(time.time())}"
-            res_1d = requests.get(url_1d, headers=headers, timeout=2).json()
-            res_data = res_1d.get('chart', {}).get('result', [])[0]
-            closes = res_data['indicators']['quote'][0]['close']
-            valid_closes = [c for c in closes if c is not None]
-            if len(valid_closes) >= 2:
-                return valid_closes[-1], valid_closes[-2]
-            elif len(valid_closes) == 1:
-                return valid_closes[0], valid_closes[0]
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            res_list = res.get('quoteResponse', {}).get('result', [])
+            if res_list:
+                cp = res_list[0].get('regularMarketPrice')
+                pp = res_list[0].get('regularMarketPreviousClose', cp)
+                if cp is not None: return cp, pp
         except: pass
     return None, None
 
@@ -464,8 +462,11 @@ def render_index_sparkline(df, prev_close):
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
-    y_min = min(df_chart['Close'].min(), prev_close) * 0.9995
-    y_max = max(df_chart['Close'].max(), prev_close) * 1.0005
+    y_min = min(df_chart['Close'].min(), prev_close)
+    y_max = max(df_chart['Close'].max(), prev_close)
+    buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
+    y_min -= buffer
+    y_max += buffer
     
     base = alt.Chart(df_chart).encode(
         x=alt.X('x_idx:Q', axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
@@ -797,10 +798,9 @@ live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_c
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-# 🚀 使用正確的代碼與獨立算法引擎
+# 🚀 終極備援引擎：使用 ^TWOII 確保抓得到台灣櫃買指數
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
-# 👉 修正：正確的櫃買中心代碼是 ^TWO (不是 ^TWOII)
-df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWO', fast_cache_key)
+df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
 _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
 
 with col_t1:
