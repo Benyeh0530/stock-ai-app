@@ -79,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
+# --- 1. 引擎與雲地通訊設定 ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if API_KEY:
@@ -203,12 +203,13 @@ def get_full_stock_db():
     except: pass
     return db
 
-@st.cache_data(ttl=5, show_spinner=False)
-def get_market_temp(cache_buster):
+# 🚀 徹底拔除大盤溫度的 Cache，強制每次重繪都去抓最新資料
+def get_market_temp():
     headers = {"User-Agent": "Mozilla/5.0"}
     results = {}
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=^TWII,^IXIC"
+        # 加上時間戳記擊穿 Yahoo CDN 快取
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols=^TWII,^IXIC&_t={int(time.time())}"
         res = requests.get(url, headers=headers, timeout=3).json()
         for q in res.get('quoteResponse', {}).get('result', []):
             sym = q.get('symbol')
@@ -273,19 +274,19 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-@st.cache_data(ttl=2, show_spinner=False)
-def get_realtime_tick(code, suffix, cache_buster):
+# 🚀 徹底拔除 1分K 的 Cache，強制每次重繪都去抓最新資料
+def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d&_t={int(time.time())}"
         res_1m = requests.get(url, headers=headers, timeout=3).json()
         idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
         q = res_1m['chart']['result'][0]['indicators']['quote'][0]
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=2, show_spinner=False)
+# 🚀 徹底拔除大宗報價的 Cache，強制每次重繪都去抓最新資料
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -313,13 +314,13 @@ def get_bulk_spark_prices(tw_codes, us_codes):
         except: pass
     return prices
 
-@st.cache_data(ttl=2, show_spinner=False)
-def get_single_live_price(code, is_us, cache_buster):
+# 🚀 徹底拔除單一報價的 Cache，強制每次重繪都去抓最新資料
+def get_single_live_price(code, is_us):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suf in suffixes:
         try:
-            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}"
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=2).json()
             res_list = res.get('quoteResponse', {}).get('result', [])
             if res_list:
@@ -672,18 +673,11 @@ with st.sidebar:
 st.title("⚡ AI 雲地混合智能戰情室")
 
 now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
-fast_cache_key = int(time.time()) // 3 
-
 t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
-us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
-all_us_to_fetch = tuple(us_set)
-
-live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
-market_temp = get_market_temp(fast_cache_key)
+market_temp = get_market_temp()
 
 col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
@@ -699,7 +693,7 @@ st.divider()
 twii_mas = get_index_mas('^TWII')
 twii_cp = market_temp.get('台股加權', (None, None))[0]
 if twii_cp is None:
-    twii_cp, _ = get_single_live_price('^TWII', is_us=True, cache_buster=fast_cache_key)
+    twii_cp, _ = get_single_live_price('^TWII', is_us=True)
 
 if twii_cp and twii_mas:
     st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
@@ -743,7 +737,7 @@ with tab_tw:
         alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '') 
         
         df_daily, suffix = get_historical_features(code, is_us=False)
-        df_1m = get_realtime_tick(code, suffix, fast_cache_key)
+        df_1m = get_realtime_tick(code, suffix)
         df_5k = get_kline_data(code, suffix, '5m', t5_key)
         df_15k = get_kline_data(code, suffix, '15m', t15_key)
         
@@ -764,7 +758,7 @@ with tab_tw:
             prev_p = df_daily['Close'].iloc[-2]
             
         if curr_p is None:
-            curr_p, prev_p_fallback = get_single_live_price(code, is_us=False, cache_buster=fast_cache_key)
+            curr_p, prev_p_fallback = get_single_live_price(code, is_us=False)
             if prev_p is None: prev_p = prev_p_fallback
             
         if curr_p is None: curr_p = 0.0
@@ -853,10 +847,7 @@ with tab_tw:
             my_p, my_l, my_dir, my_tt = float(stock.get('my_price', 0.0)), int(stock.get('my_lots', 1)), stock.get('my_dir', '作多'), stock.get('my_trade_type', '當沖')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### {name}({code})")
-            
-            # 🚀 修復：使用安全的 prev_p 計算漲跌
             with c_p: st.metric("實時現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
-            
             with c_pnl:
                 if my_p > 0:
                     if st.session_state.authenticated:
@@ -916,7 +907,7 @@ with tab_tw:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     c_name = all_stocks.get(c, c); icon = "👑" if i == 0 else "🔗"
-                    cp, pp = get_single_live_price(c, is_us=False, cache_buster=fast_cache_key)
+                    cp, pp = get_single_live_price(c, is_us=False)
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
@@ -1014,7 +1005,7 @@ with tab_us:
         code = stock['code']; alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '')
         
         df_daily, suffix = get_historical_features(code, is_us=True)
-        df_1m_us = get_realtime_tick(code, suffix, fast_cache_key)
+        df_1m_us = get_realtime_tick(code, suffix)
         df_5k = get_kline_data(code, suffix, '5m', t5_key)
         df_15k = get_kline_data(code, suffix, '15m', t15_key)
         
@@ -1035,7 +1026,7 @@ with tab_us:
             prev_p = df_daily['Close'].iloc[-2]
             
         if curr_p is None:
-            curr_p, prev_p_fallback = get_single_live_price(code, is_us=True, cache_buster=fast_cache_key)
+            curr_p, prev_p_fallback = get_single_live_price(code, is_us=True)
             if prev_p is None: prev_p = prev_p_fallback
             
         if curr_p is None: curr_p = 0.0
@@ -1095,10 +1086,7 @@ with tab_us:
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
-            
-            # 🚀 修復：使用安全的 prev_p 進行計算，避免 live_pp 錯誤
             with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
-            
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1156,7 +1144,7 @@ with tab_us:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     icon = "👑" if i == 0 else "🔗"
-                    cp, pp = get_single_live_price(c, is_us=True, cache_buster=fast_cache_key)
+                    cp, pp = get_single_live_price(c, is_us=True)
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
@@ -1271,7 +1259,7 @@ with tab_ai:
                         for s in stocks:
                             c_p_t = get_bulk_spark_prices(tuple([s['code']] if market_type == "台股" else []), tuple([s['code']] if market_type == "美股" else []))
                             c_p = c_p_t.get(s['code'], (None, None))[0]
-                            if c_p is None: c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
+                            if c_p is None: c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"))
                             
                             target = 0; cond = ">="
                             if c_p:
@@ -1329,8 +1317,8 @@ with tab_radar:
                     time.sleep(0.2)
                     progress_bar.progress((i + 1) / len(pool_codes))
                     
-                    df_1m = get_realtime_tick(code, ".TW", fast_cache_key)
-                    if df_1m.empty: df_1m = get_realtime_tick(code, ".TWO", fast_cache_key)
+                    df_1m = get_realtime_tick(code, ".TW")
+                    if df_1m.empty: df_1m = get_realtime_tick(code, ".TWO")
                     
                     if not df_1m.empty:
                         df_m = df_1m.copy()
