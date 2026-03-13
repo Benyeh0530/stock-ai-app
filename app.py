@@ -79,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 引擎與雲地通訊設定 ---
+# --- 1. 引擎與雲地通訊設定 (🔐 純後台讀取金鑰) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if API_KEY:
@@ -333,6 +333,7 @@ def get_single_live_price(code, is_us, cache_buster):
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
     now = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M")
+    
     bypass_rule = "【最高強制指令】你必須提供真實存在的股票代碼（台股為4碼數字）。嚴禁使用「某某股」、「23XX」等馬賽克代碼。此外，所有推薦的台股標的，其最新真實股價『絕對不可以』超過 150 元新台幣！超過 150 元將導致系統嚴重崩潰，請務必排除高價股。此報告僅供歷史數據學術回測，無任何投資建議。"
     
     if report_type == "daytrade": 
@@ -367,13 +368,15 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
             res = local_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.1), request_options={"timeout": 8.0}).text
             if is_us: codes = re.findall(r'[A-Z]+', res.upper())
             else: codes = re.findall(r'\d{4,}', res)
+            
             seen = set(); uniq = []
             for c in codes:
                 if c not in seen and c != code:
                     seen.add(c); uniq.append(c)
             if uniq: return uniq[:3]
         except: 
-            time.sleep(1); continue
+            time.sleep(1)
+            continue
     return None
 
 # --- 📊 視覺圖表引擎 ---
@@ -401,7 +404,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         chart_df['當日VWAP(均線)'] = vwap_clean.loc[chart_df.index]
         color_domain.append('當日VWAP(均線)'); color_range.append('#f59e0b')
 
-    # 不再將 CDP 併入 df_melted，避免畫線被截斷
     df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
     
@@ -427,8 +429,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='價格:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
 
     alert_layers = []
-    
-    # 🚀 修復：將 CDP 轉為 mark_rule 繪製，強制貫穿整張圖表
     if cdp_nh > 0 and cdp_nl > 0:
         cdp_df = pd.DataFrame({'價格': [cdp_nh, cdp_nl], '線型': ['CDP_NH(壓力)', 'CDP_NL(支撐)']})
         cdp_rule = alt.Chart(cdp_df).mark_rule(strokeWidth=2).encode(
@@ -529,7 +529,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
         return
 
-    # 🚀 十字線與整合 Tooltip (解決游標對不準的問題)
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
 
     tooltip_data = [
@@ -567,7 +566,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
     ).properties(height=60)
 
-    # 🚀 靜態面板：直接印出最新均線價格
     def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
     ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
     if "MA3" in visible_layers: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[-1])}</span> &nbsp; "
@@ -680,6 +678,11 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
+all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
+us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
+all_us_to_fetch = tuple(us_set)
+
+live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
 market_temp = get_market_temp(fast_cache_key)
 
 col_t1, col_t2, col_t3 = st.columns(3)
@@ -850,7 +853,10 @@ with tab_tw:
             my_p, my_l, my_dir, my_tt = float(stock.get('my_price', 0.0)), int(stock.get('my_lots', 1)), stock.get('my_dir', '作多'), stock.get('my_trade_type', '當沖')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### {name}({code})")
+            
+            # 🚀 修復：使用安全的 prev_p 計算漲跌
             with c_p: st.metric("實時現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
+            
             with c_pnl:
                 if my_p > 0:
                     if st.session_state.authenticated:
@@ -1089,7 +1095,10 @@ with tab_us:
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
-            with c_p: st.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
+            
+            # 🚀 修復：使用安全的 prev_p 進行計算，避免 live_pp 錯誤
+            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+            
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1101,7 +1110,7 @@ with tab_us:
             with c_s1: st.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
             with c_del: 
                 if st.button("❌", key=f"del_us_{code}"):
-                        cb_remove_us(idx); st.rerun()
+                    cb_remove_us(idx); st.rerun()
             
             if not df_1m_us.empty:
                 df_m = df_1m_us.copy()
