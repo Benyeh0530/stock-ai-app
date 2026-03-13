@@ -166,6 +166,40 @@ def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.se
 def cb_clear_all():
     st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
+def cb_ai_calc_price_tw(idx, code, curr_p):
+    if not API_KEY: return
+    try:
+        alerts = st.session_state.tw_stocks[idx].get('alerts', [])
+        dir_str = '作多' if (alerts[0]['cond'] if alerts else ">=")=='>=' else '作空'
+        prompt = f"針對台股 {code} 現價 {curr_p} 給當沖{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
+        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        match = re.search(r'\{.*\}', res, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            if alerts: 
+                st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
+                st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
+            st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
+            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+    except: pass
+
+def cb_ai_calc_price_us(idx, code, curr_p):
+    if not API_KEY: return
+    try:
+        alerts = st.session_state.us_stocks[idx].get('alerts', [])
+        dir_str = '作多' if (alerts[0]['cond'] if alerts else ">=")=='>=' else '作空'
+        prompt = f"針對美股 {code} 現價 {curr_p} 給波段{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
+        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+        match = re.search(r'\{.*\}', res, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            if alerts: 
+                st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
+                st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
+            st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
+            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+    except: pass
+
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     st.session_state.tw_stocks = data.get("tw", [])
@@ -203,7 +237,8 @@ def get_full_stock_db():
     except: pass
     return db
 
-@st.cache_data(ttl=2, show_spinner=False)
+# 🚀 三大指數即時資料引擎
+@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_realtime_data(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -276,7 +311,7 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-@st.cache_data(ttl=2, show_spinner=False)
+@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -288,8 +323,8 @@ def get_realtime_tick(code, suffix, cache_buster):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=2, show_spinner=False)
-def get_bulk_spark_prices(tw_codes, us_codes):
+@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+def get_bulk_spark_prices(tw_codes, us_codes, cache_buster):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
     for c in us_codes: symbols.append(c)
@@ -316,7 +351,7 @@ def get_bulk_spark_prices(tw_codes, us_codes):
         except: pass
     return prices
 
-@st.cache_data(ttl=2, show_spinner=False)
+@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_single_live_price(code, is_us, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
@@ -389,17 +424,15 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-# 🚀 全新大盤微型走勢圖 (解決平移死魚線，加入專業漸層面積)
 def render_index_sparkline(df, prev_close):
     if df.empty or prev_close is None: return
-    # 暴力攔截最後 270 根 K 棒 (約 4.5 小時的開盤時間)，徹底無視時區偏移問題
+    # 暴力攔截最後 270 根 K 棒 (約 4.5 小時開盤時間)，徹底無視時區偏移
     df_chart = df.tail(270).copy()
     df_chart['x_idx'] = np.arange(len(df_chart))
     
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
-    # 緊密貼合 Y 軸，不強迫包含 prev_close，避免被極端跳空壓縮成一條線
     y_min = df_chart['Close'].min() * 0.9995
     y_max = df_chart['Close'].max() * 1.0005
     
@@ -411,10 +444,8 @@ def render_index_sparkline(df, prev_close):
         y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
     
-    # 平盤虛線
     rule = alt.Chart(pd.DataFrame({'p': [prev_close]})).mark_rule(color='#94a3b8', strokeDash=[3,3], strokeWidth=1.5).encode(y='p:Q')
     
-    # 專業漸層光影
     area = base.mark_area(
         color=alt.Gradient(
             gradient='linear',
@@ -728,11 +759,10 @@ t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.mi
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
 all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
-us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
+us_set = set([s['code'] for s in st.session_state.us_stocks])
 all_us_to_fetch = tuple(us_set)
 
-live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
-market_temp = get_market_temp(fast_cache_key)
+live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
@@ -816,8 +846,9 @@ with tab_tw:
         mas = {}; cdp_nh = cdp_nl = 0.0
         curr_p = None; prev_p = None
         
+        live_cp, live_pp = live_price_dict.get(code, (None, None))
+        
         if not df_1m.empty:
-            curr_p = df_1m['Close'].iloc[-1]
             df_1m['Typical_Price'] = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
             df_1m['PV'] = df_1m['Typical_Price'] * df_1m['Volume']
             df_1m['Date'] = df_1m.index.tz_convert('Asia/Taipei').date
@@ -826,8 +857,11 @@ with tab_tw:
             df_1m['VWAP'] = (df_1m['Cum_PV'] / df_1m['Cum_Vol'].replace(0, np.nan)).bfill().fillna(df_1m['Close'])
             mas['當日VWAP'] = df_1m['VWAP'].iloc[-1]
             
-        if not df_daily.empty and len(df_daily) >= 2:
-            prev_p = df_daily['Close'].iloc[-2]
+        if live_cp is not None: curr_p = live_cp
+        elif not df_1m.empty: curr_p = df_1m['Close'].iloc[-1]
+        
+        if live_pp is not None: prev_p = live_pp
+        elif not df_daily.empty and len(df_daily) >= 2: prev_p = df_daily['Close'].iloc[-2]
             
         if curr_p is None:
             curr_p, prev_p_fallback = get_single_live_price(code, is_us=False, cache_buster=fast_cache_key)
@@ -1054,26 +1088,11 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"): st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復：拔除 on_click，放回主執行緒，徹底杜絕畫面重繪出雙胞胎 K 線圖的 Bug！
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_{code}"):
                             with st.spinner("AI 運算中..."):
-                                alerts_list = st.session_state.tw_stocks[idx].get('alerts', [])
-                                dir_str = '作多' if (alerts_list[0]['cond'] if alerts_list else ">=")=='>=' else '作空'
-                                prompt = f"針對台股 {code} 現價 {curr_p} 給當沖{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
-                                try:
-                                    res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-                                    match = re.search(r'\{.*\}', res, re.DOTALL)
-                                    if match:
-                                        data = json.loads(match.group(0))
-                                        if alerts_list: 
-                                            st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
-                                            st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-                                        st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
-                                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                                except: pass
+                                cb_ai_calc_price_tw(idx, code, curr_p)
                             st.rerun()
 
 # ====================
@@ -1092,8 +1111,9 @@ with tab_us:
         mas = {}; cdp_nh = cdp_nl = 0.0
         curr_p = None; prev_p = None
         
+        live_cp, live_pp = live_price_dict.get(code, (None, None))
+        
         if not df_1m_us.empty:
-            curr_p = df_1m_us['Close'].iloc[-1]
             df_1m_us['Typical_Price'] = (df_1m_us['High'] + df_1m_us['Low'] + df_1m_us['Close']) / 3
             df_1m_us['PV'] = df_1m_us['Typical_Price'] * df_1m_us['Volume']
             df_1m_us['Date'] = df_1m_us.index.tz_convert('America/New_York').date
@@ -1102,8 +1122,11 @@ with tab_us:
             df_1m_us['VWAP'] = (df_1m_us['Cum_PV'] / df_1m_us['Cum_Vol'].replace(0, np.nan)).bfill().fillna(df_1m_us['Close'])
             mas['當日VWAP'] = df_1m_us['VWAP'].iloc[-1]
 
-        if not df_daily.empty and len(df_daily) >= 2:
-            prev_p = df_daily['Close'].iloc[-2]
+        if live_cp is not None: curr_p = live_cp
+        elif not df_1m_us.empty: curr_p = df_1m_us['Close'].iloc[-1]
+        
+        if live_pp is not None: prev_p = live_pp
+        elif not df_daily.empty and len(df_daily) >= 2: prev_p = df_daily['Close'].iloc[-2]
             
         if curr_p is None:
             curr_p, prev_p_fallback = get_single_live_price(code, is_us=True, cache_buster=fast_cache_key)
@@ -1166,7 +1189,9 @@ with tab_us:
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
+            
             with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+            
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1298,26 +1323,11 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復：拔除 on_click，放回主執行緒，徹底杜絕畫面重繪出雙胞胎 K 線圖的 Bug！
                 with c_btn2:
                     if API_KEY:
                         if st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
                             with st.spinner("AI 運算中..."):
-                                alerts_list = st.session_state.us_stocks[idx].get('alerts', [])
-                                dir_str = '作多' if (alerts_list[0]['cond'] if alerts_list else ">=")=='>=' else '作空'
-                                prompt = f"針對美股 {code} 現價 {curr_p} 給波段{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
-                                try:
-                                    res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-                                    match = re.search(r'\{.*\}', res, re.DOTALL)
-                                    if match:
-                                        data = json.loads(match.group(0))
-                                        if alerts_list: 
-                                            st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
-                                            st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-                                        st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
-                                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-                                except: pass
+                                cb_ai_calc_price_us(idx, code, curr_p)
                             st.rerun()
 
 # ====================
@@ -1345,7 +1355,7 @@ with tab_ai:
                 for i, (cat, stocks) in enumerate(report.items()):
                     with sub_tabs[i]:
                         for s in stocks:
-                            c_p_t = get_bulk_spark_prices(tuple([s['code']] if market_type == "台股" else []), tuple([s['code']] if market_type == "美股" else []))
+                            c_p_t = get_bulk_spark_prices(tuple([s['code']] if market_type == "台股" else []), tuple([s['code']] if market_type == "美股" else []), fast_cache_key)
                             c_p = c_p_t.get(s['code'], (None, None))[0]
                             if c_p is None: c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
                             
@@ -1398,7 +1408,7 @@ with tab_radar:
         else:
             with st.spinner(f"正在掃描 {len(pool_codes)} 檔股票的即時量能，請稍候..."):
                 found_targets = []
-                prices_dict = get_bulk_spark_prices(tuple(pool_codes), tuple())
+                prices_dict = get_bulk_spark_prices(tuple(pool_codes), tuple(), fast_cache_key)
                 progress_bar = st.progress(0)
                 
                 for i, code in enumerate(pool_codes):
