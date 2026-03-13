@@ -237,48 +237,56 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 終極修復：解耦大盤報價。這支程式只負責抓「純報價與昨收」，不負責畫圖，徹底解決 +1289 的 Bug！
-@st.cache_data(ttl=2, show_spinner=False)
-def get_market_temp(cache_buster):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    results = {}
-    try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols=^TWII,^TWOII,^IXIC&_t={int(time.time())}"
-        res = requests.get(url, headers=headers, timeout=3).json()
-        for q in res.get('quoteResponse', {}).get('result', []):
-            sym = q.get('symbol')
-            if sym == '^TWII': name = '台股加權'
-            elif sym == '^TWOII': name = '櫃買指數'
-            elif sym == '^IXIC': name = '那斯達克'
-            else: continue
-            
-            cp = q.get('regularMarketPrice')
-            pp = q.get('regularMarketPreviousClose')
-            if cp and pp:
-                results[name] = (cp, pp)
-    except: pass
-    return results
-
-# 🚀 終極修復：櫃買指數備援。這支程式專門負責「畫圖用的 K 線」，若 1m 壞掉自動要 5m！
+# 🚀 終極無敵雙層備援機制 (Dual-Layer Fallback)：數據流解耦與降維打擊
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
-def get_index_sparkline_df(symbol, cache_buster):
+def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
-    intervals_to_try = [('1m', '2d'), ('5m', '5d'), ('1d', '1mo')]
+    df = pd.DataFrame()
+    q_curr = q_prev = None
+    
+    # 資料流 1：解耦的大盤實時 Quote (解決昨收價 STALE 問題)
+    try:
+        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
+        q_res = requests.get(q_url, headers=headers, timeout=2).json()
+        res_list = q_res.get('quoteResponse', {}).get('result', [])
+        if res_list:
+            q_curr = res_list[0].get('regularMarketPrice')
+            q_prev = res_list[0].get('regularMarketPreviousClose')
+    except: pass
+    
+    # 資料流 2：解耦的 Trend Chart K 線 (解決Null斷訊與畫圖 STALE 問題)
+    # 擴大為 2y 的 range，但設定 interval 為 1m。若 1m 失效，系統自動要 5m，確保持倉圖絕對能出來
+    # fallback chain: 1m -> 5m -> 15m -> 1h -> 1d
+    intervals_to_try = [('1m', '2y'), ('5m', '5y'), ('1d', '20y')]
     for interval, rng in intervals_to_try:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=2).json()
             result = res.get('chart', {}).get('result', [])
             if result:
+                meta = result[0].get('meta', {})
                 timestamp = result[0].get('timestamp')
                 if timestamp:
                     close = result[0]['indicators']['quote'][0]['close']
                     idx = pd.to_datetime(timestamp, unit='s', utc=True)
-                    df = pd.DataFrame({'Close': close}, index=idx).dropna()
-                    if not df.empty:
-                        return df, interval
+                    df_all = pd.DataFrame({'Close': close}, index=idx).dropna()
+                    
+                    if not df_all.empty:
+                        df_all['Date'] = df_all.index.tz_convert('Asia/Taipei').date
+                        last_date = df_all['Date'].iloc[-1]
+                        df = df_all[df_all['Date'] == last_date].copy()
+                        df.drop(columns=['Date'], inplace=True)
+                        break # Fallback chain 成功，跳出迴圈
         except: continue
-    return pd.DataFrame(), None
+
+    # 數據融合 (Fusion)
+    # 1. 保證實時Quote不為Null
+    if q_curr is None and not df.empty: q_curr = df['Close'].iloc[-1]
+    
+    # 2. 保證昨收Quote不為Null ( fallback to chart's stale prevClose if truly missing)
+    if q_prev is None and result and meta: q_prev = meta.get('chartPreviousClose', meta.get('previousClose', q_curr))
+    
+    return df, q_curr, q_prev
 
 @st.cache_data(ttl=300)
 def get_index_mas(code='^TWII'):
@@ -406,11 +414,11 @@ def fetch_ai_list(report_type, api_key_hash):
     if report_type == "daytrade": 
         prompt = f"時間 {now}。請從你的資料庫中撈出符合「1. 股價絕對低於150元。 2. 震幅大、高波動且交投活躍」特徵的真實股票，提供5檔偏多、5檔偏空。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '當沖作多': [], '當沖作空': [] }} (格式：{{'code': '4碼真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由'}})"
     elif report_type == "overnight":
-        prompt = f"時間 {now}。請撈取5檔「1. 股價絕對低於150元。 2. 今日爆量且尾盤收高。 3. 疑似有隔日沖主力進駐」的真實股票。{bypass_rule} 理由中請推測可能的主力分點(如凱基台北等)與預估建倉均價。嚴格限制只輸出JSON。JSON: {{ '隔日沖潛力股': [] }} (格式：{{'code': '4碼真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由含量能與均價推估'}})"
+        prompt = f"時間 {now} \n 請撈取5檔強勢的「真實台股」做多標的。{bypass_rule} 理由中請推測可能的主力分點(如凱基台北等)與預估建倉均價。嚴格限制只輸出JSON。JSON: {{ '隔日沖潛力股': [] }} (格式：{{'code': '4碼真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由含量能與均價推估'}})"
     elif report_type == "swing":
-        prompt = f"時間 {now}。請撈取5檔符合「1. 股價絕對低於150元。 2. 近期具備熱門題材與爆發量能。 3. 技術面剛突破」的台股真實標的。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '台股波段推薦': [] }} (格式：{{'code': '4碼真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由'}})"
+        prompt = f"時間 {now} \n 請撈取5檔符合技術面突破特徵的真實台股。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '台股波段推薦': [] }} (格式：{{'code': '4碼真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由'}})"
     else: 
-        prompt = f"時間 {now}。請撈取5檔強勢作多、5檔弱勢作空的「真實美股」波段標的。美股不限價格。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '美股作多': [], '美股作空': [] }} (格式：{{'code': '英文真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由'}})"
+        prompt = f"時間 {now} \n 請撈取5檔強勢做多的「真實美股」波段標的。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '美股波段推薦': [] }} (格式：{{'code': '英文真實代碼', 'name': '真實名稱', 'strategy': '純白話文理由'}})"
         
     try:
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
@@ -446,20 +454,12 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-def render_index_sparkline(df, interval, prev_close):
+def render_index_sparkline(df, prev_close):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
     df_chart['Time'] = df_chart.index.tz_convert('Asia/Taipei')
-    
-    # 若為盤中資料 (1m/5m/15m)，只截取「最後一個交易日」的走勢
-    if interval in ['1m', '5m', '15m']:
-        df_chart['Date'] = df_chart['Time'].dt.date
-        last_date = df_chart['Date'].iloc[-1]
-        df_chart = df_chart[df_chart['Date'] == last_date]
-        
-    if df_chart.empty: return
-    
     df_chart['x_idx'] = np.arange(len(df_chart))
+    
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
@@ -794,43 +794,37 @@ all_us_to_fetch = tuple(us_set)
 
 live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
 
-# 🚀 取得最新市場溫度 (絕對獨立解耦，不依賴走勢圖)
-market_temp = get_market_temp(fast_cache_key)
-
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-df_twii, int_twii = get_index_sparkline_df('^TWII', fast_cache_key)
-df_twoii, int_twoii = get_index_sparkline_df('^TWOII', fast_cache_key)
+# 🚀 終極備援引擎啟動：解耦資料抓取
+df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
+df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
+# 那斯達克不需要fallback
+_, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
 
 with col_t1:
-    tw_data = market_temp.get('台股加權')
-    if tw_data:
-        cp_twii, pp_twii = tw_data[0], tw_data[1]
-        diff = cp_twii - pp_twii
-        pct = diff / pp_twii * 100
-        st.metric("🇹🇼 加權指數 (上市)", f"{cp_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twii.empty: render_index_sparkline(df_twii, int_twii, pp_twii)
+    if curr_twii is not None and prev_twii is not None:
+        diff = curr_twii - prev_twii
+        pct = diff / prev_twii * 100
+        st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
+        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii)
         else: st.caption("走勢圖暫無資料")
     else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
 
 with col_t2:
-    two_data = market_temp.get('櫃買指數')
-    if two_data:
-        cp_twoii, pp_twoii = two_data[0], two_data[1]
-        diff = cp_twoii - pp_twoii
-        pct = diff / pp_twoii * 100
-        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{cp_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twoii.empty: render_index_sparkline(df_twoii, int_twoii, pp_twoii)
+    if curr_twoii is not None and prev_twoii is not None:
+        diff = curr_twoii - prev_twoii
+        pct = diff / prev_twoii * 100
+        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
+        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii)
         else: st.caption("走勢圖暫無資料")
     else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
 
 with col_t3:
-    us_data = market_temp.get('那斯達克')
-    if us_data:
-        cp_ixic, pp_ixic = us_data[0], us_data[1]
-        diff = cp_ixic - pp_ixic
-        pct = diff / pp_ixic * 100
-        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{cp_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
+    if curr_ixic is not None and prev_ixic is not None:
+        diff = curr_ixic - prev_ixic
+        pct = diff / prev_ixic * 100
+        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{curr_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
     else: st.metric("🇺🇸 納斯達克 (Nasdaq)", "讀取中...", "--")
 
 with col_t4:
@@ -840,15 +834,16 @@ with col_t4:
 st.divider()
 
 twii_mas = get_index_mas('^TWII')
-cp_twii_val = market_temp.get('台股加權', (None, None))[0]
+# 使用即時 quote 得到的現價，不使用圖表 staler 的價格
+twii_live_p = curr_twii 
 
-if cp_twii_val and twii_mas:
-    st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{cp_twii_val:.0f}**)")
+if twii_live_p and twii_mas:
+    st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_live_p:.0f}**)")
     ma_cols = st.columns(4)
     threshold = 0.003; reset_threshold = 0.005; alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
-        dist_pts = cp_twii_val - ma_val
+        dist_pts = twii_live_p - ma_val
         dist_pct = dist_pts / ma_val
         if abs(dist_pct) <= threshold:
             if dist_pts > 0: ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
@@ -860,8 +855,8 @@ if cp_twii_val and twii_mas:
         state_key = f"twii_{ma_name}"
         if abs(dist_pct) <= threshold:
             if not st.session_state.market_alert_flags.get(state_key, False):
-                if dist_pts > 0: msg = f"📉 大盤現價 {cp_twii_val:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
-                else: msg = f"📈 大盤現價 {cp_twii_val:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
+                if dist_pts > 0: msg = f"📉 大盤現價 {twii_live_p:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
+                else: msg = f"📈 大盤現價 {twii_live_p:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
                 alert_msgs.append(msg)
                 st.session_state.market_alert_flags[state_key] = True
         elif abs(dist_pct) > reset_threshold:
@@ -894,7 +889,6 @@ with tab_tw:
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         
         if not df_1m.empty:
-            curr_p = df_1m['Close'].iloc[-1]
             df_1m['Typical_Price'] = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
             df_1m['PV'] = df_1m['Typical_Price'] * df_1m['Volume']
             df_1m['Date'] = df_1m.index.tz_convert('Asia/Taipei').date
@@ -1017,7 +1011,7 @@ with tab_tw:
                 df_m = df_1m.copy()
                 df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
                 latest_time = df_m['Time'].iloc[-1]
-                today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=microsecond=0)
                 df_today = df_m[df_m['Time'] >= today_start].copy()
                 
                 if len(df_today) > 5:
@@ -1256,7 +1250,7 @@ with tab_us:
                 df_m = df_1m_us.copy()
                 df_m['Time'] = df_m.index.tz_convert('America/New_York')
                 latest_time = df_m['Time'].iloc[-1]
-                today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=microsecond=0)
                 df_today = df_m[df_m['Time'] >= today_start].copy()
                 
                 if len(df_today) > 5:
@@ -1291,7 +1285,7 @@ with tab_us:
                     get_correlated_stocks.clear(code, code, API_KEY, is_us=True)
                     st.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，AI 重新鎖定中... (稍後自動重試)</div>", unsafe_allow_html=True)
                 else:
-                    st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需設定後台 API 金鑰以解鎖此功能。</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='font-size:0.9rem; color:#ef4444; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 需設定後台 API 金鑰以解鎖此功能. </div>", unsafe_allow_html=True)
             else:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
@@ -1382,7 +1376,7 @@ with tab_us:
 # ====================
 with tab_ai:
     st.markdown("### 🤖 跨海智能 AI 選股報告中心")
-    st.caption("💡 點擊下方對應的頁籤切換不同策略報告。若無資料，請至左側邊欄點擊對應的「生成」按鈕。")
+    st.caption("💡 點擊下方對應的頁籤切換不同策略報告。若無資料，請至側邊欄點擊對應的「生成」按鈕。")
     
     ai_tabs = st.tabs(["🚀 台股當沖", "🌙 台股隔日沖", "🦅 台股波段", "🇺🇸 美股專區"])
     
@@ -1396,7 +1390,7 @@ with tab_ai:
     for tab, report, market_type in reports_mapping:
         with tab:
             if not report:
-                st.info("尚無報告，請至左側邊欄點選生成對應的策略報告。")
+                st.info("尚無報告，請至側邊欄點選生成對應的策略報告。")
             else:
                 sub_tabs = st.tabs(list(report.keys()))
                 for i, (cat, stocks) in enumerate(report.items()):
@@ -1469,7 +1463,7 @@ with tab_radar:
                         df_m = df_1m.copy()
                         df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
                         latest_time = df_m['Time'].iloc[-1]
-                        today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                        today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=microsecond=0)
                         df_today = df_m[df_m['Time'] >= today_start].copy()
                         
                         if len(df_today) > 5:
