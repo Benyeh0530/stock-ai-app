@@ -182,7 +182,7 @@ if 'initialized' not in st.session_state:
     if 'market_alert_flags' not in st.session_state: st.session_state.market_alert_flags = {}
     st.session_state.initialized = True
 
-# --- 🚀 極速資料引擎 (強制穿透快取版) ---
+# --- 2. 數據引擎 ---
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
@@ -203,7 +203,6 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 使用 /v7/finance/quote 極速取得大盤資訊
 @st.cache_data(ttl=5, show_spinner=False)
 def get_market_temp(cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -274,8 +273,7 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-# 🚀 絕對實時引擎：帶入 cache_buster 強制每 3 秒刷新
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=2, show_spinner=False)
 def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -287,8 +285,35 @@ def get_realtime_tick(code, suffix, cache_buster):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-# 🚀 捨棄延遲的 Spark，改用最極速的 /v7/quote
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=2, show_spinner=False)
+def get_bulk_spark_prices(tw_codes, us_codes):
+    symbols = []
+    for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
+    for c in us_codes: symbols.append(c)
+    if not symbols: return {}
+    prices = {}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    chunk_size = 15
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i + chunk_size]
+        sym_str = ",".join(chunk)
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/spark?symbols={sym_str}&range=1d&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=5).json()
+            results = res.get('spark', {}).get('result', [])
+            for r in results:
+                sym = r.get('symbol', '')
+                base_sym = sym.replace('.TW', '').replace('.TWO', '')
+                resp_list = r.get('response', [])
+                if resp_list:
+                    meta = resp_list[0].get('meta', {})
+                    curr_p = meta.get('regularMarketPrice')
+                    prev_p = meta.get('chartPreviousClose', meta.get('previousClose', curr_p))
+                    if curr_p is not None: prices[base_sym] = (curr_p, prev_p)
+        except: pass
+    return prices
+
+@st.cache_data(ttl=2, show_spinner=False)
 def get_single_live_price(code, is_us, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
@@ -376,15 +401,21 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         chart_df['當日VWAP(均線)'] = vwap_clean.loc[chart_df.index]
         color_domain.append('當日VWAP(均線)'); color_range.append('#f59e0b')
 
-    if cdp_nh > 0 and cdp_nl > 0:
-        chart_df['CDP_NH(壓力)'] = cdp_nh; chart_df['CDP_NL(支撐)'] = cdp_nl
-        color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)']); color_range.extend(['#ef4444', '#10b981'])
-    
+    # 不再將 CDP 併入 df_melted，避免畫線被截斷
     df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
+    
+    if cdp_nh > 0 and cdp_nl > 0:
+        valid_prices = pd.concat([valid_prices, pd.Series([cdp_nh, cdp_nl])])
+        color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)'])
+        color_range.extend(['#ef4444', '#10b981'])
+
     y_min, y_max = (valid_prices.min() * 0.995, valid_prices.max() * 1.005) if not valid_prices.empty else (0, 100)
 
-    base = alt.Chart(df_melted).encode(x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=8)))
+    base = alt.Chart(df_melted).encode(
+        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=8))
+    )
+    
     line = base.mark_line(strokeWidth=2.5).encode(
         y=alt.Y('價格:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
         color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0))
@@ -396,6 +427,16 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='價格:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
 
     alert_layers = []
+    
+    # 🚀 修復：將 CDP 轉為 mark_rule 繪製，強制貫穿整張圖表
+    if cdp_nh > 0 and cdp_nl > 0:
+        cdp_df = pd.DataFrame({'價格': [cdp_nh, cdp_nl], '線型': ['CDP_NH(壓力)', 'CDP_NL(支撐)']})
+        cdp_rule = alt.Chart(cdp_df).mark_rule(strokeWidth=2).encode(
+            y='價格:Q',
+            color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range))
+        )
+        alert_layers.append(cdp_rule)
+        
     for al in alerts:
         if al.get('type') == '固定價格' and al.get('price', 0) > 0:
             alert_layers.append(alt.Chart(pd.DataFrame({'價格': [al['price']]})).mark_rule(color='#eab308', strokeWidth=2, strokeDash=[4, 4]).encode(y='價格:Q'))
@@ -413,7 +454,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# 🚀 萬能十字線 (Crosshair) 整合版 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -489,7 +529,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
         return
 
-    # 🚀 十字線與整合 Tooltip
+    # 🚀 十字線與整合 Tooltip (解決游標對不準的問題)
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
 
     tooltip_data = [
@@ -634,7 +674,6 @@ with st.sidebar:
 st.title("⚡ AI 雲地混合智能戰情室")
 
 now_tpe = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
-# 🚀 絕對實時金鑰：每3秒變更一次，強制擊穿系統快取
 fast_cache_key = int(time.time()) // 3 
 
 t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 5}"
@@ -649,7 +688,6 @@ with col_t1:
 with col_t2:
     if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    # 🚀 視覺心跳燈：讓使用者看見秒數在跳，確認網頁沒有當機
     if API_KEY: st.success(f"⚡ 實時跳動中 | 更新: {now_tpe.strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
@@ -702,7 +740,6 @@ with tab_tw:
         alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '') 
         
         df_daily, suffix = get_historical_features(code, is_us=False)
-        # 🚀 帶入 fast_cache_key 獲取絕對實時的 1 分 K
         df_1m = get_realtime_tick(code, suffix, fast_cache_key)
         df_5k = get_kline_data(code, suffix, '5m', t5_key)
         df_15k = get_kline_data(code, suffix, '15m', t15_key)
@@ -713,9 +750,11 @@ with tab_tw:
         if not df_1m.empty:
             curr_p = df_1m['Close'].iloc[-1]
             df_1m['Typical_Price'] = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
-            df_1m['Cum_Vol'] = df_1m['Volume'].cumsum().replace(0, np.nan)
-            df_1m['Cum_PV'] = (df_1m['Typical_Price'] * df_1m['Volume']).cumsum()
-            df_1m['VWAP'] = (df_1m['Cum_PV'] / df_1m['Cum_Vol']).bfill().fillna(df_1m['Close'])
+            df_1m['PV'] = df_1m['Typical_Price'] * df_1m['Volume']
+            df_1m['Date'] = df_1m.index.tz_convert('Asia/Taipei').date
+            df_1m['Cum_Vol'] = df_1m.groupby('Date')['Volume'].cumsum()
+            df_1m['Cum_PV'] = df_1m.groupby('Date')['PV'].cumsum()
+            df_1m['VWAP'] = (df_1m['Cum_PV'] / df_1m['Cum_Vol'].replace(0, np.nan)).bfill().fillna(df_1m['Close'])
             mas['當日VWAP'] = df_1m['VWAP'].iloc[-1]
             
         if not df_daily.empty and len(df_daily) >= 2:
@@ -979,9 +1018,11 @@ with tab_us:
         if not df_1m_us.empty:
             curr_p = df_1m_us['Close'].iloc[-1]
             df_1m_us['Typical_Price'] = (df_1m_us['High'] + df_1m_us['Low'] + df_1m_us['Close']) / 3
-            df_1m_us['Cum_Vol'] = df_1m_us['Volume'].cumsum().replace(0, np.nan)
-            df_1m_us['Cum_PV'] = (df_1m_us['Typical_Price'] * df_1m_us['Volume']).cumsum()
-            df_1m_us['VWAP'] = (df_1m_us['Cum_PV'] / df_1m_us['Cum_Vol']).bfill().fillna(df_1m_us['Close'])
+            df_1m_us['PV'] = df_1m_us['Typical_Price'] * df_1m_us['Volume']
+            df_1m_us['Date'] = df_1m_us.index.tz_convert('America/New_York').date
+            df_1m_us['Cum_Vol'] = df_1m_us.groupby('Date')['Volume'].cumsum()
+            df_1m_us['Cum_PV'] = df_1m_us.groupby('Date')['PV'].cumsum()
+            df_1m_us['VWAP'] = (df_1m_us['Cum_PV'] / df_1m_us['Cum_Vol'].replace(0, np.nan)).bfill().fillna(df_1m_us['Close'])
             mas['當日VWAP'] = df_1m_us['VWAP'].iloc[-1]
 
         if not df_daily.empty and len(df_daily) >= 2:
@@ -1048,7 +1089,7 @@ with tab_us:
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
-            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+            with c_p: st.metric("收盤現價", f"${curr_p:.2f}", f"${curr_p - live_pp:.2f}" if live_pp else "--")
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1060,9 +1101,8 @@ with tab_us:
             with c_s1: st.metric("支撐(S1)", f"${s1:.2f}", delta_color="off")
             with c_del: 
                 if st.button("❌", key=f"del_us_{code}"):
-                    cb_remove_us(idx); st.rerun()
+                        cb_remove_us(idx); st.rerun()
             
-            # 🚀 動態橫向標籤：主力足跡 (美股版)
             if not df_1m_us.empty:
                 df_m = df_1m_us.copy()
                 df_m['Time'] = df_m.index.tz_convert('America/New_York')
@@ -1114,7 +1154,7 @@ with tab_us:
                         corr_display.append(f"<b>{icon} {c}</b> {cp:.2f} (<span style='color:{color};'>{sign}{diff:.2f}, {sign}{pct:.2f}%</span>)")
                     else: corr_display.append(f"<b>{icon} {c}</b> 讀取中...")
                 st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
-
+            
             st.divider()
             
             c_ctrl1, c_ctrl2, c_ctrl3 = st.columns([1.5, 1, 1])
@@ -1220,7 +1260,9 @@ with tab_ai:
                 for i, (cat, stocks) in enumerate(report.items()):
                     with sub_tabs[i]:
                         for s in stocks:
-                            c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
+                            c_p_t = get_bulk_spark_prices(tuple([s['code']] if market_type == "台股" else []), tuple([s['code']] if market_type == "美股" else []))
+                            c_p = c_p_t.get(s['code'], (None, None))[0]
+                            if c_p is None: c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
                             
                             target = 0; cond = ">="
                             if c_p:
@@ -1271,6 +1313,7 @@ with tab_radar:
         else:
             with st.spinner(f"正在掃描 {len(pool_codes)} 檔股票的即時量能，請稍候..."):
                 found_targets = []
+                prices_dict = get_bulk_spark_prices(tuple(pool_codes), tuple())
                 progress_bar = st.progress(0)
                 
                 for i, code in enumerate(pool_codes):
@@ -1295,7 +1338,9 @@ with tab_radar:
                             spikes = df_today[spike_cond].copy()
                             
                             if not spikes.empty:
-                                curr_p = df_today['Close'].iloc[-1]
+                                curr_p = prices_dict.get(code, (None, None))[0]
+                                if curr_p is None: curr_p = df_today['Close'].iloc[-1]
+                                
                                 max_spike = spikes.loc[spikes['Volume'].idxmax()]
                                 t_str = max_spike['Time'].strftime("%H:%M")
                                 is_buy = max_spike['Close'] >= max_spike['Open']
