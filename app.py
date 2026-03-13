@@ -271,7 +271,8 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-@st.cache_data(ttl=15, show_spinner=False)
+# 🚀 修復：將快取 TTL 從 15秒 降到 2秒，確保 3秒更新絕對有效！
+@st.cache_data(ttl=2, show_spinner=False)
 def get_realtime_tick(code, suffix):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -283,7 +284,8 @@ def get_realtime_tick(code, suffix):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=10, show_spinner=False)
+# 🚀 修復：將報價快取 TTL 從 10秒 降到 2秒，確保畫面即時跳動
+@st.cache_data(ttl=2, show_spinner=False)
 def get_bulk_spark_prices(tw_codes, us_codes):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -311,7 +313,7 @@ def get_bulk_spark_prices(tw_codes, us_codes):
         except: pass
     return prices
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=2, show_spinner=False)
 def get_single_live_price(code, is_us=False):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
@@ -438,7 +440,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# 🚀 全新升級：全幅雙向十字線 (Crosshair) 整合版 K 線圖
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -496,7 +497,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q',
             color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
-        # 移除 bar 上的 tooltip，交由十字線統一顯示
         bar = base.mark_bar().encode(
             y='Open:Q', y2='Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
         )
@@ -515,7 +515,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
         return
 
-    # 🚀 十字線核心邏輯 (縱線 + 橫線 + 整合 Tooltip)
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
 
     tooltip_data = [
@@ -535,12 +534,10 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         tooltip=tooltip_data
     ).add_params(hover)
 
-    # 垂直虛線
     v_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
     
-    # 水平虛線 (跟隨收盤價，全幅延伸)
     h_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         y='Close:Q',
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
@@ -555,7 +552,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
     ).properties(height=60)
 
-    # 🚀 靜態面板：直接印出最新均線價格 (免游標懸停即看)
     def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
     ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
     if "MA3" in visible_layers: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[-1])}</span> &nbsp; "
@@ -684,7 +680,8 @@ with col_t1:
 with col_t2:
     if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
 with col_t3:
-    if API_KEY: st.success(f"🟢 AI 雷達待命中 | 隱碼保護啟用")
+    # 🚀 視覺心跳燈：加入最新更新時間，讓使用者知道畫面有在跳動
+    if API_KEY: st.success(f"🟢 AI 雷達待命中 | 更新: {now_tpe.strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
 st.divider()
@@ -753,7 +750,6 @@ with tab_tw:
             curr_p = live_cp if live_cp is not None else df_1m['Close'].iloc[-1]
             prev_p = live_pp if live_pp is not None else df_daily['Close'].iloc[-2]
             
-            # 🚀 寫入 5K/15K MA10 供監控防線使用
             if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
             if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
             
@@ -952,7 +948,6 @@ with tab_tw:
                     st.markdown("##### 🎯 專屬監控防線")
                     for a_idx, al in enumerate(alerts):
                         c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
-                        # 🚀 更新選單：移除 CDP(中價)，加入 5K與15K MA
                         opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                         current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
                         
@@ -1019,7 +1014,6 @@ with tab_us:
                 mas['日線3MA'] = df_daily_rt['Close'].tail(3).mean(); mas['日線5MA'] = df_daily_rt['Close'].tail(5).mean()
                 mas['日線10MA'] = df_daily_rt['Close'].tail(10).mean(); mas['日線23MA'] = df_daily_rt['Close'].tail(23).mean()
             
-            # 🚀 寫入 5K/15K MA10 供監控防線使用
             if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
             if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
 
@@ -1103,7 +1097,7 @@ with tab_us:
                             for _, row in spikes.iterrows():
                                 t_str = row['Time'].strftime("%H:%M")
                                 is_buy = row['Close'] >= row['Open']
-                                icon = "🟢" if is_buy else "🔴"  # 美股綠漲紅跌
+                                icon = "🟢" if is_buy else "🔴"
                                 bg_color = "rgba(16, 185, 129, 0.15)" if is_buy else "rgba(239, 68, 68, 0.15)"
                                 border_color = "#10b981" if is_buy else "#ef4444"
                                 text_color = "#34d399" if is_buy else "#f87171"
@@ -1347,4 +1341,7 @@ with tab_radar:
                 else:
                     st.info("掃描完畢。目前的目標池中尚未發現明顯的 5K/15K 爆量跡象。")
 
-if auto_refresh: time.sleep(3); st.rerun()
+if auto_refresh:
+    time.sleep(3)
+    try: st.rerun()
+    except AttributeError: st.experimental_rerun()
