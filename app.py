@@ -166,40 +166,6 @@ def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.se
 def cb_clear_all():
     st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
-def cb_ai_calc_price_tw(idx, code, curr_p):
-    if not API_KEY: return
-    try:
-        alerts = st.session_state.tw_stocks[idx].get('alerts', [])
-        dir_str = '作多' if (alerts[0]['cond'] if alerts else ">=")=='>=' else '作空'
-        prompt = f"針對台股 {code} 現價 {curr_p} 給當沖{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
-        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        match = re.search(r'\{.*\}', res, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            if alerts: 
-                st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
-                st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-            st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
-            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-    except: pass
-
-def cb_ai_calc_price_us(idx, code, curr_p):
-    if not API_KEY: return
-    try:
-        alerts = st.session_state.us_stocks[idx].get('alerts', [])
-        dir_str = '作多' if (alerts[0]['cond'] if alerts else ">=")=='>=' else '作空'
-        prompt = f"針對美股 {code} 現價 {curr_p} 給波段{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
-        res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
-        match = re.search(r'\{.*\}', res, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            if alerts: 
-                st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
-                st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-            st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
-            save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
-    except: pass
-
 if 'initialized' not in st.session_state:
     data = load_watchlist()
     st.session_state.tw_stocks = data.get("tw", [])
@@ -237,7 +203,6 @@ def get_full_stock_db():
     except: pass
     return db
 
-# 🚀 取得大盤與櫃買即時資料 (含K線，用於微型走勢圖)
 @st.cache_data(ttl=2, show_spinner=False)
 def get_index_realtime_data(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -316,7 +281,7 @@ def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d&_t={int(time.time())}"
         res_1m = requests.get(url, headers=headers, timeout=3).json()
         idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
         q = res_1m['chart']['result'][0]['indicators']['quote'][0]
@@ -357,7 +322,7 @@ def get_single_live_price(code, is_us, cache_buster):
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suf in suffixes:
         try:
-            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}"
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=2).json()
             res_list = res.get('quoteResponse', {}).get('result', [])
             if res_list:
@@ -424,33 +389,45 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-# 🚀 專屬繪製大盤微型走勢圖 (Sparkline)
+# 🚀 全新大盤微型走勢圖 (解決平移死魚線，加入專業漸層面積)
 def render_index_sparkline(df, prev_close):
     if df.empty or prev_close is None: return
-    df_chart = df.copy()
-    df_chart['Time'] = df_chart.index.tz_convert('Asia/Taipei')
-    
-    today_start = df_chart['Time'].iloc[-1].replace(hour=9, minute=0, second=0, microsecond=0)
-    end_time = df_chart['Time'].iloc[-1].replace(hour=13, minute=30, second=0, microsecond=0)
-    
-    df_chart = df_chart[(df_chart['Time'] >= today_start) & (df_chart['Time'] <= end_time)]
-    if df_chart.empty: return
+    # 暴力攔截最後 270 根 K 棒 (約 4.5 小時的開盤時間)，徹底無視時區偏移問題
+    df_chart = df.tail(270).copy()
+    df_chart['x_idx'] = np.arange(len(df_chart))
     
     curr_p = df_chart['Close'].iloc[-1]
     color = "#ef4444" if curr_p >= prev_close else "#10b981"
     
-    y_min = min(df_chart['Close'].min(), prev_close) * 0.999
-    y_max = max(df_chart['Close'].max(), prev_close) * 1.001
+    # 緊密貼合 Y 軸，不強迫包含 prev_close，避免被極端跳空壓縮成一條線
+    y_min = df_chart['Close'].min() * 0.9995
+    y_max = df_chart['Close'].max() * 1.0005
     
     base = alt.Chart(df_chart).encode(
-        x=alt.X('Time:T', scale=alt.Scale(domain=[today_start.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+        x=alt.X('x_idx:Q', axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
+    
     line = base.mark_line(color=color, strokeWidth=2).encode(
-        y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+        y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
+    
+    # 平盤虛線
     rule = alt.Chart(pd.DataFrame({'p': [prev_close]})).mark_rule(color='#94a3b8', strokeDash=[3,3], strokeWidth=1.5).encode(y='p:Q')
     
-    st.altair_chart(alt.layer(rule, line).properties(height=60), use_container_width=True)
+    # 專業漸層光影
+    area = base.mark_area(
+        color=alt.Gradient(
+            gradient='linear',
+            stops=[alt.GradientStop(color=color, offset=0), alt.GradientStop(color='rgba(0,0,0,0)', offset=1)],
+            x1=1, x2=1, y1=0, y2=1
+        ),
+        opacity=0.3
+    ).encode(
+        y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False)),
+        y2=alt.datum(y_min)
+    )
+    
+    st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
@@ -750,7 +727,13 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-# 🚀 頂部三大指數與微型走勢圖
+all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
+us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
+all_us_to_fetch = tuple(us_set)
+
+live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
+market_temp = get_market_temp(fast_cache_key)
+
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
 df_twii, cp_twii, pp_twii = get_index_realtime_data('^TWII', fast_cache_key)
@@ -1071,9 +1054,27 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"): st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
+                
+                # 🚀 終極修復：拔除 on_click，放回主執行緒，徹底杜絕畫面重繪出雙胞胎 K 線圖的 Bug！
                 with c_btn2:
                     if API_KEY:
-                        st.button("🤖 AI 算價", key=f"ai_p_{code}", on_click=cb_ai_calc_price_tw, args=(idx, code, curr_p))
+                        if st.button("🤖 AI 算價", key=f"ai_p_{code}"):
+                            with st.spinner("AI 運算中..."):
+                                alerts_list = st.session_state.tw_stocks[idx].get('alerts', [])
+                                dir_str = '作多' if (alerts_list[0]['cond'] if alerts_list else ">=")=='>=' else '作空'
+                                prompt = f"針對台股 {code} 現價 {curr_p} 給當沖{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
+                                try:
+                                    res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+                                    match = re.search(r'\{.*\}', res, re.DOTALL)
+                                    if match:
+                                        data = json.loads(match.group(0))
+                                        if alerts_list: 
+                                            st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
+                                            st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
+                                        st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
+                                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                                except: pass
+                            st.rerun()
 
 # ====================
 # 戰區 2：美股波段戰情
@@ -1165,10 +1166,7 @@ with tab_us:
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
-            
-            # 🚀 修復：使用安全的 prev_p 進行計算，避免 live_pp 錯誤
             with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
-            
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1300,9 +1298,27 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
+                
+                # 🚀 終極修復：拔除 on_click，放回主執行緒，徹底杜絕畫面重繪出雙胞胎 K 線圖的 Bug！
                 with c_btn2:
                     if API_KEY:
-                        st.button("🤖 AI 算價", key=f"ai_p_us_{code}", on_click=cb_ai_calc_price_us, args=(idx, code, curr_p))
+                        if st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
+                            with st.spinner("AI 運算中..."):
+                                alerts_list = st.session_state.us_stocks[idx].get('alerts', [])
+                                dir_str = '作多' if (alerts_list[0]['cond'] if alerts_list else ">=")=='>=' else '作空'
+                                prompt = f"針對美股 {code} 現價 {curr_p} 給波段{dir_str}建議。嚴格回傳JSON格式：{{\"entry\": 數字, \"target\": 數字}}"
+                                try:
+                                    res = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text
+                                    match = re.search(r'\{.*\}', res, re.DOTALL)
+                                    if match:
+                                        data = json.loads(match.group(0))
+                                        if alerts_list: 
+                                            st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
+                                            st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
+                                        st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
+                                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
+                                except: pass
+                            st.rerun()
 
 # ====================
 # 戰區 3：🤖 AI 選股報告中心
