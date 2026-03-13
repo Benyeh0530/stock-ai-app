@@ -166,7 +166,6 @@ def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.se
 def cb_clear_all():
     st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
-# 🚀 解決破版 Bug：將「AI 算價」改為 Callback 執行，避免 Streamlit 渲染衝突
 def cb_ai_calc_price_tw(idx, code, curr_p):
     if not API_KEY: return
     try:
@@ -200,7 +199,6 @@ def cb_ai_calc_price_us(idx, code, curr_p):
             st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
     except: pass
-
 
 if 'initialized' not in st.session_state:
     data = load_watchlist()
@@ -239,22 +237,26 @@ def get_full_stock_db():
     except: pass
     return db
 
-@st.cache_data(ttl=5, show_spinner=False)
-def get_market_temp(cache_buster):
+# 🚀 取得大盤與櫃買即時資料 (含K線，用於微型走勢圖)
+@st.cache_data(ttl=2, show_spinner=False)
+def get_index_realtime_data(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
-    results = {}
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=^TWII,^IXIC"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=2d&_t={int(time.time())}"
         res = requests.get(url, headers=headers, timeout=3).json()
-        for q in res.get('quoteResponse', {}).get('result', []):
-            sym = q.get('symbol')
-            name = '台股加權' if sym == '^TWII' else '那斯達克'
-            cp = q.get('regularMarketPrice')
-            pp = q.get('regularMarketPreviousClose')
-            if cp and pp:
-                results[name] = (cp, ((cp - pp) / pp) * 100)
-    except: pass
-    return results
+        meta = res['chart']['result'][0]['meta']
+        prev_close = meta.get('chartPreviousClose', meta.get('previousClose'))
+        
+        timestamp = res['chart']['result'][0]['timestamp']
+        close = res['chart']['result'][0]['indicators']['quote'][0]['close']
+        
+        idx = pd.to_datetime(timestamp, unit='s', utc=True)
+        df = pd.DataFrame({'Close': close}, index=idx).dropna()
+        
+        curr_price = df['Close'].iloc[-1] if not df.empty else meta.get('regularMarketPrice')
+        return df, curr_price, prev_close
+    except:
+        return pd.DataFrame(), None, None
 
 @st.cache_data(ttl=300)
 def get_index_mas(code='^TWII'):
@@ -365,7 +367,6 @@ def get_single_live_price(code, is_us, cache_buster):
         except: pass
     return None, None
 
-# 🚀 終極防護繞過指令：確保只出真代碼、並嚴格鎖定150元以下
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
@@ -412,18 +413,45 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
             res = local_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.1), request_options={"timeout": 8.0}).text
             if is_us: codes = re.findall(r'[A-Z]+', res.upper())
             else: codes = re.findall(r'\d{4,}', res)
-            
             seen = set(); uniq = []
             for c in codes:
                 if c not in seen and c != code:
                     seen.add(c); uniq.append(c)
             if uniq: return uniq[:3]
         except: 
-            time.sleep(1)
-            continue
+            time.sleep(1); continue
     return None
 
 # --- 📊 視覺圖表引擎 ---
+
+# 🚀 專屬繪製大盤微型走勢圖 (Sparkline)
+def render_index_sparkline(df, prev_close):
+    if df.empty or prev_close is None: return
+    df_chart = df.copy()
+    df_chart['Time'] = df_chart.index.tz_convert('Asia/Taipei')
+    
+    today_start = df_chart['Time'].iloc[-1].replace(hour=9, minute=0, second=0, microsecond=0)
+    end_time = df_chart['Time'].iloc[-1].replace(hour=13, minute=30, second=0, microsecond=0)
+    
+    df_chart = df_chart[(df_chart['Time'] >= today_start) & (df_chart['Time'] <= end_time)]
+    if df_chart.empty: return
+    
+    curr_p = df_chart['Close'].iloc[-1]
+    color = "#ef4444" if curr_p >= prev_close else "#10b981"
+    
+    y_min = min(df_chart['Close'].min(), prev_close) * 0.999
+    y_max = max(df_chart['Close'].max(), prev_close) * 1.001
+    
+    base = alt.Chart(df_chart).encode(
+        x=alt.X('Time:T', scale=alt.Scale(domain=[today_start.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+    )
+    line = base.mark_line(color=color, strokeWidth=2).encode(
+        y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+    )
+    rule = alt.Chart(pd.DataFrame({'p': [prev_close]})).mark_rule(color='#94a3b8', strokeDash=[3,3], strokeWidth=1.5).encode(y='p:Q')
+    
+    st.altair_chart(alt.layer(rule, line).properties(height=60), use_container_width=True)
+
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -722,36 +750,47 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
-us_set = set([s['code'] for s in st.session_state.us_stocks]); us_set.add('^TWII')
-all_us_to_fetch = tuple(us_set)
+# 🚀 頂部三大指數與微型走勢圖
+col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch)
-market_temp = get_market_temp(fast_cache_key)
+df_twii, cp_twii, pp_twii = get_index_realtime_data('^TWII', fast_cache_key)
+df_twoii, cp_twoii, pp_twoii = get_index_realtime_data('^TWOII', fast_cache_key)
+_, cp_ixic, pp_ixic = get_index_realtime_data('^IXIC', fast_cache_key)
 
-col_t1, col_t2, col_t3 = st.columns(3)
 with col_t1:
-    if '台股加權' in market_temp: st.metric("🇹🇼 台股大盤溫度", f"{market_temp['台股加權'][0]:.2f}", f"{market_temp['台股加權'][1]:.2f}%", delta_color="normal" if market_temp['台股加權'][1] > 0 else "inverse")
+    if cp_twii and pp_twii:
+        diff = cp_twii - pp_twii
+        pct = diff / pp_twii * 100
+        st.metric("🇹🇼 加權指數 (上市)", f"{cp_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
+        render_index_sparkline(df_twii, pp_twii)
+
 with col_t2:
-    if '那斯達克' in market_temp: st.metric("🇺🇸 科技股溫度 (Nasdaq)", f"{market_temp['那斯達克'][0]:.2f}", f"{market_temp['那斯達克'][1]:.2f}%", delta_color="normal" if market_temp['那斯達克'][1] > 0 else "inverse")
+    if cp_twoii and pp_twoii:
+        diff = cp_twoii - pp_twoii
+        pct = diff / pp_twoii * 100
+        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{cp_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
+        render_index_sparkline(df_twoii, pp_twoii)
+
 with col_t3:
-    if API_KEY: st.success(f"⚡ 實時跳動中 | 更新: {now_tpe.strftime('%H:%M:%S')}")
+    if cp_ixic and pp_ixic:
+        diff = cp_ixic - pp_ixic
+        pct = diff / pp_ixic * 100
+        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{cp_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff > 0 else "inverse")
+
+with col_t4:
+    if API_KEY: st.success(f"⚡ 實時跳動中\n\n更新: {now_tpe.strftime('%H:%M:%S')}")
     else: st.error("🔴 API 未設定")
 
 st.divider()
 
 twii_mas = get_index_mas('^TWII')
-twii_cp = market_temp.get('台股加權', (None, None))[0]
-if twii_cp is None:
-    twii_cp, _ = get_single_live_price('^TWII', is_us=True, cache_buster=fast_cache_key)
-
-if twii_cp and twii_mas:
-    st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{twii_cp:.0f}**)")
+if cp_twii and twii_mas:
+    st.markdown(f"##### 📊 台股大盤關鍵均線雷達 (現價: **{cp_twii:.0f}**)")
     ma_cols = st.columns(4)
     threshold = 0.003; reset_threshold = 0.005; alert_msgs = []
     
     for idx, (ma_name, ma_val) in enumerate(twii_mas.items()):
-        dist_pts = twii_cp - ma_val
+        dist_pts = cp_twii - ma_val
         dist_pct = dist_pts / ma_val
         if abs(dist_pct) <= threshold:
             if dist_pts > 0: ma_cols[idx].warning(f"**{ma_name}** `{ma_val:.0f}`\n\n⚠️ **回測警戒**：即將跌破，僅剩 **{dist_pts:.0f}** 點 ({dist_pct*100:+.2f}%)")
@@ -763,8 +802,8 @@ if twii_cp and twii_mas:
         state_key = f"twii_{ma_name}"
         if abs(dist_pct) <= threshold:
             if not st.session_state.market_alert_flags.get(state_key, False):
-                if dist_pts > 0: msg = f"📉 大盤現價 {twii_cp:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
-                else: msg = f"📈 大盤現價 {twii_cp:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
+                if dist_pts > 0: msg = f"📉 大盤現價 {cp_twii:.0f}，即將向下回測 {ma_name} ({ma_val:.0f})！距離僅 {dist_pts:.0f} 點"
+                else: msg = f"📈 大盤現價 {cp_twii:.0f}，即將向上挑戰 {ma_name} ({ma_val:.0f})！距離僅 {abs(dist_pts):.0f} 點"
                 alert_msgs.append(msg)
                 st.session_state.market_alert_flags[state_key] = True
         elif abs(dist_pct) > reset_threshold:
@@ -1032,8 +1071,6 @@ with tab_tw:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_tw_{code}"): st.session_state.tw_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復：將 AI 算價改為 Callback 觸發，避免 UI 重複破版渲染
                 with c_btn2:
                     if API_KEY:
                         st.button("🤖 AI 算價", key=f"ai_p_{code}", on_click=cb_ai_calc_price_tw, args=(idx, code, curr_p))
@@ -1129,6 +1166,7 @@ with tab_us:
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
             
+            # 🚀 修復：使用安全的 prev_p 進行計算，避免 live_pp 錯誤
             with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
             
             with c_pnl:
@@ -1262,8 +1300,6 @@ with tab_us:
                 c_btn1, c_btn2, _ = st.columns([2, 2, 3])
                 with c_btn1:
                     if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
-                
-                # 🚀 終極修復：將 AI 算價改為 Callback 觸發
                 with c_btn2:
                     if API_KEY:
                         st.button("🤖 AI 算價", key=f"ai_p_us_{code}", on_click=cb_ai_calc_price_us, args=(idx, code, curr_p))
