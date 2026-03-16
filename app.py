@@ -240,46 +240,43 @@ if 'initialized' not in st.session_state:
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
-
-# 🚀 終極修復：滿血版高可用資料庫引擎 (解決 9933 消失與 77 找不到的問題)
-@st.cache_data(ttl=86400)
+# 🚀 終極修復：防快取毒化機制 (Cache Poisoning Prevention)
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # 王者歸位：優先使用 FinMind，因為它涵蓋上市、上櫃、興櫃最齊全
-    try:
-        url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
-        res = requests.get(url, timeout=10, headers=headers).json()
-        if res.get('msg') == 'success':
-            for item in res['data']: 
-                db[str(item['stock_id'])] = str(item['stock_name'])
-            # 防呆驗證：確保有抓到足夠數量的股票才直接返回
-            if len(db) > 1000: 
-                return db
-    except: pass
-    
-    # 備援 1：證交所 OpenAPI (上市)
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
         if res_tw.status_code == 200:
             for item in res_tw.json(): db[str(item['Code'])] = str(item['Name'])
     except: pass
     
-    # 備援 2：櫃買中心 OpenAPI (上櫃)
     try:
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
         if res_otc.status_code == 200:
             for item in res_otc.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
     
-    # 備援 3：櫃買中心 OpenAPI (興櫃)
     try:
         res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
         if res_emg.status_code == 200:
             for item in res_emg.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
     
+    try:
+        url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+        res = requests.get(url, timeout=5, headers=headers).json()
+        if res.get('msg') == 'success':
+            for item in res['data']:
+                code = str(item['stock_id'])
+                if code not in db: db[code] = str(item['stock_name'])
+    except: pass
+    
+    # 防呆防空值：如果抓不到100檔，直接清除快取，讓下次重新抓取，絕不卡死 24 小時！
+    if len(db) < 100:
+        get_full_stock_db.clear()
+        
     return db
 
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
@@ -511,6 +508,7 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
+# 🚀 終極修復：完美鎖定大盤走勢的 09:00 ~ 13:30 X軸，確保盤中圖表只顯示實際進度不被拉伸
 def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
@@ -521,6 +519,7 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     last_date = df_chart.index[-1].date()
     df_chart = df_chart[df_chart.index.date == last_date]
     
+    # 補點填縫：確保每分鐘都有一個資料點
     df_chart = df_chart.resample('1min').ffill()
     
     if market_type == "TW":
@@ -530,13 +529,15 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
     
-    # 🚀 鎖定時間軸的核心：重塑 Index
+    # 強制重塑全天候的 Index，右側未來時間會自動填入 NaN，Altair 就不會畫線，保持完美空白！
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     df_chart = df_chart.reindex(full_index)
         
     df_chart.index.name = 'Time'
     df_chart = df_chart.reset_index()
+    df_chart['x_idx'] = np.arange(len(df_chart))
     
+    # 找出最後一筆有效報價來決定顏色
     valid_closes = df_chart['Close'].dropna()
     if valid_closes.empty: return
     curr_p = valid_closes.iloc[-1]
@@ -549,8 +550,10 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
+    # 鎖死 X 軸 Domain，保證時間刻度長度絕對精準
+    end_idx = len(df_chart) - 1
     base = alt.Chart(df_chart).encode(
-        x=alt.X('Time:T', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+        x=alt.X('x_idx:Q', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
     
     line = base.mark_line(color=color, strokeWidth=2).encode(
@@ -573,6 +576,7 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
+# 🚀 終極修復：個股走勢圖同樣鎖死 09:00 ~ 13:30 時間軸，不拉伸！
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -594,13 +598,15 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
     
-    # 🚀 鎖定 X 軸範圍
+    # 強制重塑全天候的 Index
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     chart_df = chart_df.reindex(full_index)
         
     chart_df.index.name = 'Time'
     chart_df = chart_df.reset_index()
     chart_df['現價'] = chart_df['Close']
+    chart_df['x_idx'] = np.arange(len(chart_df))
+    end_idx = len(chart_df) - 1
 
     color_domain = ['現價']; color_range = ['#3b82f6']
     if 'VWAP' in df_1m.columns:
@@ -609,7 +615,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         chart_df['當日VWAP(均線)'] = vwap_df.reindex(full_index).values
         color_domain.append('當日VWAP(均線)'); color_range.append('#f59e0b')
 
-    df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
+    df_melted = chart_df.melt(id_vars=['Time', 'x_idx', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
     valid_prices = df_melted[df_melted['價格'] > 0]['價格']
     
     if cdp_nh > 0 and cdp_nl > 0:
@@ -620,7 +626,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     y_min, y_max = (valid_prices.min() * 0.995, valid_prices.max() * 1.005) if not valid_prices.empty else (0, 100)
 
     base = alt.Chart(df_melted).encode(
-        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(format='%H:%M', grid=False, tickCount=8))
+        x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False))
     )
     
     line = base.mark_line(strokeWidth=2.5).encode(
@@ -628,7 +634,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0))
     )
 
-    hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
+    hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
     points = line.mark_circle(size=80).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0)), tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]).add_params(hover)
     v_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='價格:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
@@ -649,7 +655,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     down_color = "#10b981" if not is_us else "#ef4444"
     
     base_vol = alt.Chart(chart_df).encode(
-        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False))
+        x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False))
     )
     v_rules_vol = base_vol.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
@@ -695,7 +701,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
         df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
         
-        # 🚀 鎖定 K 線圖 X 軸範圍
         last_date = df_chart.index.dropna()[-1].date()
         if is_us:
             start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
@@ -842,7 +847,7 @@ with st.sidebar:
     st.header("🎯 1. 自訂監控加入")
     all_stocks = get_full_stock_db()
     if all_stocks: stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
-    else: stock_list = ["伺服器連線異常，請使用下方強制加入"]
+    else: stock_list = ["伺服器連線異常，請點擊下方重新載入按鈕"]
 
     selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
     if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
@@ -851,6 +856,11 @@ with st.sidebar:
             cb_add_tw(code, name); st.rerun()
 
     with st.expander("🛠️ 找不到？手動強制加入"):
+        # 🚀 滿血復活按鈕：一鍵解除 API 快取毒化，找回全部股票
+        if st.button("🔄 重新載入股票清單 (解決連線異常)", use_container_width=True):
+            get_full_stock_db.clear()
+            st.rerun()
+            
         tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330, 興櫃為4碼數字)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
