@@ -92,16 +92,22 @@ TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", os.environ.get("TELEGRAM_CHAT_ID
 if 'agent_url' not in st.session_state:
     st.session_state.agent_url = "http://127.0.0.1:5000"
 
-# 🚀 修復：加入網頁 Toast 同步提示，幫助釐清推播是否卡在 TG 金鑰
 def send_telegram_alert(msg):
-    # 網頁端同步跳出通知，證明觸發器有作動
-    st.toast(f"🔔 觸發警報: {msg[:25]}...", icon="🚨")
+    st.toast(f"🔔 內部觸發警報: {msg[:25]}...", icon="🚨")
     
     if not TG_BOT_TOKEN or not TG_CHAT_ID: 
+        st.error("⚠️ Telegram 推播失敗：您尚未設定 TG_BOT_TOKEN 或 TELEGRAM_CHAT_ID。")
         return
+        
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=2)
-    except: pass
+    try: 
+        res = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
+        if res.status_code != 200:
+            st.error(f"⚠️ Telegram API 拒絕發送！代碼：{res.status_code}，原因：{res.text}")
+    except requests.exceptions.Timeout:
+        st.error("⚠️ Telegram 發送超時！您的伺服器連線到 Telegram 太慢了。")
+    except Exception as e: 
+        st.error(f"⚠️ Telegram 未知連線錯誤：{e}")
 
 def fire_order_to_agent(code, price, action, qty=1):
     url = f"{st.session_state.agent_url.rstrip('/')}/api/fire"
@@ -171,7 +177,6 @@ def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.se
 def cb_clear_all():
     st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
-# 🚀 修復：AI 算入新價格後，強迫解除「狀態鎖死」，讓推播重新生效
 def cb_ai_calc_price_tw(idx, code, curr_p):
     if not API_KEY: return
     try:
@@ -190,7 +195,6 @@ def cb_ai_calc_price_tw(idx, code, curr_p):
             if alerts: 
                 st.session_state.tw_stocks[idx]['alerts'][0]['type'] = "固定價格"
                 st.session_state.tw_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-                # 強制解除鎖定
                 st.session_state.tw_stocks[idx]['alerts'][0]['triggered'] = False
                 st.session_state.tw_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
             st.session_state.tw_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **{data['entry']}** | 停利目標: **{data['target']}**"
@@ -215,7 +219,6 @@ def cb_ai_calc_price_us(idx, code, curr_p):
             if alerts: 
                 st.session_state.us_stocks[idx]['alerts'][0]['type'] = "固定價格"
                 st.session_state.us_stocks[idx]['alerts'][0]['price'] = float(data['target'])
-                # 強制解除鎖定
                 st.session_state.us_stocks[idx]['alerts'][0]['triggered'] = False
                 st.session_state.us_stocks[idx]['alerts'][0]['touch_2_triggered'] = False
             st.session_state.us_stocks[idx]['ai_advice'] = f"🤖 理想進場價: **${data['entry']}** | 停利目標: **${data['target']}**"
@@ -495,7 +498,7 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-def render_index_sparkline(df, interval, prev_close, market_type="TW"):
+def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
     
@@ -604,7 +607,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
     points = line.mark_circle(size=80).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0)), tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]).add_params(hover)
-    
     v_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='價格:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
 
@@ -862,6 +864,11 @@ with st.sidebar:
     new_agent_url = st.text_input("地端 Agent 網址 (Ngrok/IP)", value=st.session_state.agent_url)
     if new_agent_url != st.session_state.agent_url:
         st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
+        
+    # 🚀 新增專屬 Telegram 推播測試按鈕
+    st.markdown("##### 🔔 Telegram 推播測試")
+    if st.button("發送測試警報", use_container_width=True):
+        send_telegram_alert("✅ 這是一條測試訊息，您的 Telegram 推播功能設定完全正確！")
 
     st.divider()
 
@@ -887,7 +894,6 @@ live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_c
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-# 🚀 終極備援引擎啟動：使用正確的 ^TWOII (上櫃) 與安全的降維打擊邏輯
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
 df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
 _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
@@ -897,7 +903,7 @@ with col_t1:
         diff = curr_twii - prev_twii
         pct = diff / prev_twii * 100
         st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twii.empty: render_index_sparkline(df_twii, "1m", prev_twii, "TW")
+        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii, "TW")
         else: st.caption("走勢圖暫無資料")
     else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
 
@@ -906,7 +912,7 @@ with col_t2:
         diff = curr_twoii - prev_twoii
         pct = diff / prev_twoii * 100
         st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twoii.empty: render_index_sparkline(df_twoii, "1m", prev_twoii, "TW")
+        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii, "TW")
         else: st.caption("⚠️ Yahoo 暫無上櫃分K")
     else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
 
@@ -951,6 +957,7 @@ if twii_live_p and twii_mas:
         elif abs(dist_pct) > reset_threshold:
             st.session_state.market_alert_flags[state_key] = False
             
+    # 🚀 恢復時間封印：確保只在盤中推播大盤警報
     if alert_msgs and is_tw_market_open:
         send_telegram_alert("⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs))
     
@@ -1030,7 +1037,9 @@ with tab_tw:
 
         if is_vol_surge:
             if not stock.get('vol_alert_triggered', False):
-                if is_tw_market_open: send_telegram_alert(f"📊 🚨【台股動能異常】\n{name}({code}) 觸發主力爆量！\n現價：{curr_p}\n狀態：{vol_alert_msg.strip()}\n詳細：{vol_info}")
+                # 🚀 恢復時間封印：確保只在盤中推播個股動能警報
+                if is_tw_market_open: 
+                    send_telegram_alert(f"📊 🚨【台股動能異常】\n{name}({code}) 觸發主力爆量！\n現價：{curr_p}\n狀態：{vol_alert_msg.strip()}\n詳細：{vol_info}")
                 st.session_state.tw_stocks[idx]['vol_alert_triggered'] = True
                 save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
         else:
@@ -1067,13 +1076,16 @@ with tab_tw:
                         if curr_p <= t_p: touches = max(touches, 1)
 
                     if touches >= 2 and not al.get('touch_2_triggered', False):
-                        if is_tw_market_open: send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘測試 {t_p_label} 達 {touches} 次！\n現價：{curr_p}{tg_vol_str}")
+                        # 🚀 恢復時間封印
+                        if is_tw_market_open: 
+                            send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘測試 {t_p_label} 達 {touches} 次！\n現價：{curr_p}{tg_vol_str}")
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
                 
                 if cond == ">=" and curr_p < t_p * 0.995: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                 if cond == "<=" and curr_p > t_p * 1.005: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                 if touches < 2: st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
         
+        # 🚀 恢復時間封印
         if triggered_msgs and is_tw_market_open:
             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
             send_telegram_alert(f"🚨【台股多重到價】\n{name}({code}) 已觸發：{'、'.join(triggered_msgs)}！\n現價：{curr_p}\n{tg_vol_str}")
@@ -1194,7 +1206,6 @@ with tab_tw:
 
                 st.divider()
                 st.markdown("##### 🎯 專屬監控防線")
-                # 🚀 修復：當監控設定被修改時，強制重置 triggered 標籤，讓推播重新生效！
                 for a_idx, al in enumerate(alerts):
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
                     opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
@@ -1558,7 +1569,7 @@ with tab_radar:
     default_pool = "2330, 2317, 2454, 3231, 2382, 3443, 2368, 2303, 3034, 2603"
     scan_pool_input = st.text_area("🎯 掃描目標代碼 (用逗號隔開)", value=default_pool)
     
-    if st.button("🚀 啟全域爆量掃描", type="primary"):
+    if st.button("🚀 啟動全域爆量掃描", type="primary"):
         pool_codes = [c.strip() for c in scan_pool_input.split(",") if c.strip()]
         if not pool_codes:
             st.warning("請先輸入要掃描的股票代碼。")
