@@ -242,47 +242,67 @@ if 'initialized' not in st.session_state:
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
+
+# 🚀 終極修復：全市場資料庫大解鎖 (上市、上櫃、興櫃 77 滿血復活)
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
     headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # 1. 抓取上市股票 (TWSE)
+    try:
+        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
+        if res_tw.status_code == 200:
+            for item in res_tw.json(): db[str(item['Code'])] = str(item['Name'])
+    except: pass
+    
+    # 2. 抓取上櫃股票 (TPEx)
+    try:
+        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
+        if res_otc.status_code == 200:
+            for item in res_otc.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
+    except: pass
+    
+    # 3. 抓取興櫃股票 (Emerging - 解決 77XX 找不到的問題)
+    try:
+        res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
+        if res_emg.status_code == 200:
+            for item in res_emg.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
+    except: pass
+    
+    # 4. 備用資料庫 (FinMind) 確保萬無一失
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = requests.get(url, timeout=5, headers=headers).json()
         if res.get('msg') == 'success':
-            for item in res['data']: db[str(item['stock_id'])] = str(item['stock_name'])
-            if db: return db
+            for item in res['data']:
+                code = str(item['stock_id'])
+                if code not in db: db[code] = str(item['stock_name'])
     except: pass
     
-    try:
-        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
-        if res_tw.status_code == 200:
-            for item in res_tw.json(): db[item['Code']] = item['Name']
-            
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
-        if res_otc.status_code == 200:
-            for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
-            
-        res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
-        if res_emg.status_code == 200:
-            for item in res_emg.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
-    except: pass
     return db
 
+# 🚀 報價與圖表徹底解耦：現價絕不被圖表替身覆蓋
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
     q_curr = q_prev = None
     
-    try:
-        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
-        q_res = requests.get(q_url, headers=headers, timeout=2).json()
-        res_list = q_res.get('quoteResponse', {}).get('result', [])
-        if res_list:
-            q_curr = res_list[0].get('regularMarketPrice')
-            q_prev = res_list[0].get('regularMarketPreviousClose')
-    except: pass
+    # 嘗試多種官方代碼來確保 Quote 報價成功
+    symbols_to_try = [symbol]
+    if symbol == '^TWOII': symbols_to_try.append('^TWO')
+    
+    for sym in symbols_to_try:
+        try:
+            q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym}&_t={int(time.time())}"
+            q_res = requests.get(q_url, headers=headers, timeout=2).json()
+            res_list = q_res.get('quoteResponse', {}).get('result', [])
+            if res_list:
+                q_curr = res_list[0].get('regularMarketPrice')
+                q_prev = res_list[0].get('regularMarketPreviousClose')
+                if q_curr is not None: break
+        except: pass
     
     intervals_to_try = [('1m', '1d'), ('5m', '5d')]
     for interval, rng in intervals_to_try:
@@ -305,6 +325,7 @@ def get_index_data_engine(symbol, cache_buster):
                         break 
         except: continue
         
+    # 影子替身：上櫃如果抓不到，用 006201.TWO 當圖表替身 (但絕對不覆蓋點數)
     if symbol == '^TWOII' and df_spark.empty:
         try:
             proxy_url = f"https://query1.finance.yahoo.com/v8/finance/chart/006201.TWO?interval=1m&range=1d&_t={int(time.time())}"
@@ -319,6 +340,7 @@ def get_index_data_engine(symbol, cache_buster):
                     last_date = df_all['Date'].iloc[-1]
                     df_spark = df_all[df_all['Date'] == last_date].copy()
                     df_spark.drop(columns=['Date'], inplace=True)
+                    
                     if q_prev and not df_spark.empty:
                         scale_factor = q_prev / df_spark['Close'].iloc[0]
                         df_spark['Close'] = df_spark['Close'] * scale_factor
@@ -498,24 +520,33 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
+# 🚀 終極修復：完美鎖定 09:00 ~ 13:30 的 X 軸，並修正拉伸問題
 def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
     
     tz_str = 'Asia/Taipei' if market_type == "TW" else 'America/New_York'
-    df_chart['Time'] = df_chart.index.tz_convert(tz_str)
+    df_chart.index = df_chart.index.tz_convert(tz_str)
     
-    last_date = df_chart['Time'].iloc[-1].date()
+    last_date = df_chart.index[-1].date()
+    df_chart = df_chart[df_chart.index.date == last_date]
+    
+    # 關鍵！將資料強制補點到 1 分鐘，確保 X 軸不會因為斷訊被拉伸
+    df_chart = df_chart.resample('1min').ffill()
     
     if market_type == "TW":
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
+        df_chart = df_chart.between_time('09:00', '13:30')
     else:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
+        df_chart = df_chart.between_time('09:30', '16:00')
         
-    df_chart = df_chart[(df_chart['Time'] >= start_time) & (df_chart['Time'] <= end_time)]
     if df_chart.empty: return
+    
+    df_chart.index.name = 'Time'
+    df_chart = df_chart.reset_index()
     
     curr_p = df_chart['Close'].iloc[-1]
     if market_type == "TW": color = "#ef4444" if curr_p >= prev_close else "#10b981"
@@ -526,6 +557,7 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
+    # 鎖死 X 軸 Domain，保證時間刻度精準不變形
     base = alt.Chart(df_chart).encode(
         x=alt.X('Time:T', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
@@ -865,7 +897,6 @@ with st.sidebar:
     if new_agent_url != st.session_state.agent_url:
         st.session_state.agent_url = new_agent_url; st.toast("✅ Agent 連線網址已更新")
         
-    # 🚀 新增專屬 Telegram 推播測試按鈕
     st.markdown("##### 🔔 Telegram 推播測試")
     if st.button("發送測試警報", use_container_width=True):
         send_telegram_alert("✅ 這是一條測試訊息，您的 Telegram 推播功能設定完全正確！")
@@ -957,7 +988,6 @@ if twii_live_p and twii_mas:
         elif abs(dist_pct) > reset_threshold:
             st.session_state.market_alert_flags[state_key] = False
             
-    # 🚀 恢復時間封印：確保只在盤中推播大盤警報
     if alert_msgs and is_tw_market_open:
         send_telegram_alert("⚠️ 🚨【大盤關鍵均線警報】\n" + "\n".join(alert_msgs))
     
@@ -1037,7 +1067,6 @@ with tab_tw:
 
         if is_vol_surge:
             if not stock.get('vol_alert_triggered', False):
-                # 🚀 恢復時間封印：確保只在盤中推播個股動能警報
                 if is_tw_market_open: 
                     send_telegram_alert(f"📊 🚨【台股動能異常】\n{name}({code}) 觸發主力爆量！\n現價：{curr_p}\n狀態：{vol_alert_msg.strip()}\n詳細：{vol_info}")
                 st.session_state.tw_stocks[idx]['vol_alert_triggered'] = True
@@ -1076,7 +1105,6 @@ with tab_tw:
                         if curr_p <= t_p: touches = max(touches, 1)
 
                     if touches >= 2 and not al.get('touch_2_triggered', False):
-                        # 🚀 恢復時間封印
                         if is_tw_market_open: 
                             send_telegram_alert(f"⚠️ 🚨【多次叩關確認】\n{name}({code}) 近 15 分鐘測試 {t_p_label} 達 {touches} 次！\n現價：{curr_p}{tg_vol_str}")
                         st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = True
@@ -1085,7 +1113,6 @@ with tab_tw:
                 if cond == "<=" and curr_p > t_p * 1.005: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False
                 if touches < 2: st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
         
-        # 🚀 恢復時間封印
         if triggered_msgs and is_tw_market_open:
             save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
             send_telegram_alert(f"🚨【台股多重到價】\n{name}({code}) 已觸發：{'、'.join(triggered_msgs)}！\n現價：{curr_p}\n{tg_vol_str}")
