@@ -94,11 +94,9 @@ if 'agent_url' not in st.session_state:
 
 def send_telegram_alert(msg):
     st.toast(f"🔔 內部觸發警報: {msg[:25]}...", icon="🚨")
-    
     if not TG_BOT_TOKEN or not TG_CHAT_ID: 
         st.error("⚠️ Telegram 推播失敗：您尚未設定 TG_BOT_TOKEN 或 TELEGRAM_CHAT_ID。")
         return
-        
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try: 
         res = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
@@ -243,34 +241,34 @@ if 'initialized' not in st.session_state:
 
 # --- 2. 數據引擎 ---
 
-# 🚀 終極修復：全市場資料庫大解鎖 (上市、上櫃、興櫃 77 滿血復活)
+# 🚀 終極修復：拔除提早 return，徹底貫通上市、上櫃、興櫃三大資料庫
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # 1. 抓取上市股票 (TWSE)
+    # 1. 台灣證交所 (上市)
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
         if res_tw.status_code == 200:
             for item in res_tw.json(): db[str(item['Code'])] = str(item['Name'])
     except: pass
     
-    # 2. 抓取上櫃股票 (TPEx)
+    # 2. 櫃買中心 (上櫃)
     try:
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
         if res_otc.status_code == 200:
             for item in res_otc.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
     
-    # 3. 抓取興櫃股票 (Emerging - 解決 77XX 找不到的問題)
+    # 3. 櫃買中心 (興櫃) -> 解決 77XX 查不到的問題
     try:
         res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
         if res_emg.status_code == 200:
             for item in res_emg.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
     
-    # 4. 備用資料庫 (FinMind) 確保萬無一失
+    # 4. FinMind 備用融合
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = requests.get(url, timeout=5, headers=headers).json()
@@ -282,27 +280,20 @@ def get_full_stock_db():
     
     return db
 
-# 🚀 報價與圖表徹底解耦：現價絕不被圖表替身覆蓋
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
     q_curr = q_prev = None
     
-    # 嘗試多種官方代碼來確保 Quote 報價成功
-    symbols_to_try = [symbol]
-    if symbol == '^TWOII': symbols_to_try.append('^TWO')
-    
-    for sym in symbols_to_try:
-        try:
-            q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym}&_t={int(time.time())}"
-            q_res = requests.get(q_url, headers=headers, timeout=2).json()
-            res_list = q_res.get('quoteResponse', {}).get('result', [])
-            if res_list:
-                q_curr = res_list[0].get('regularMarketPrice')
-                q_prev = res_list[0].get('regularMarketPreviousClose')
-                if q_curr is not None: break
-        except: pass
+    try:
+        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
+        q_res = requests.get(q_url, headers=headers, timeout=2).json()
+        res_list = q_res.get('quoteResponse', {}).get('result', [])
+        if res_list:
+            q_curr = res_list[0].get('regularMarketPrice')
+            q_prev = res_list[0].get('regularMarketPreviousClose')
+    except: pass
     
     intervals_to_try = [('1m', '1d'), ('5m', '5d')]
     for interval, rng in intervals_to_try:
@@ -325,7 +316,6 @@ def get_index_data_engine(symbol, cache_buster):
                         break 
         except: continue
         
-    # 影子替身：上櫃如果抓不到，用 006201.TWO 當圖表替身 (但絕對不覆蓋點數)
     if symbol == '^TWOII' and df_spark.empty:
         try:
             proxy_url = f"https://query1.finance.yahoo.com/v8/finance/chart/006201.TWO?interval=1m&range=1d&_t={int(time.time())}"
@@ -340,7 +330,6 @@ def get_index_data_engine(symbol, cache_buster):
                     last_date = df_all['Date'].iloc[-1]
                     df_spark = df_all[df_all['Date'] == last_date].copy()
                     df_spark.drop(columns=['Date'], inplace=True)
-                    
                     if q_prev and not df_spark.empty:
                         scale_factor = q_prev / df_spark['Close'].iloc[0]
                         df_spark['Close'] = df_spark['Close'] * scale_factor
@@ -520,7 +509,7 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-# 🚀 終極修復：完美鎖定 09:00 ~ 13:30 的 X 軸，並修正拉伸問題
+# 🚀 終極修復：完美鎖定大盤走勢的 09:00 ~ 13:30 X軸，解決拉伸破版
 def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
@@ -531,34 +520,38 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     last_date = df_chart.index[-1].date()
     df_chart = df_chart[df_chart.index.date == last_date]
     
-    # 關鍵！將資料強制補點到 1 分鐘，確保 X 軸不會因為斷訊被拉伸
+    # 補點填縫：確保每分鐘都有一個資料點，為後續的 X 軸鎖定做準備
     df_chart = df_chart.resample('1min').ffill()
     
     if market_type == "TW":
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
-        df_chart = df_chart.between_time('09:00', '13:30')
     else:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
-        df_chart = df_chart.between_time('09:30', '16:00')
-        
-    if df_chart.empty: return
     
+    # 強制重塑全天候的 Index，右側未來時間自動填入 NaN，Altair 就不會畫線，但會保留畫布空間！
+    full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
+    df_chart = df_chart.reindex(full_index)
+        
     df_chart.index.name = 'Time'
     df_chart = df_chart.reset_index()
     
-    curr_p = df_chart['Close'].iloc[-1]
+    # 找出最後一筆有效報價來決定顏色
+    valid_closes = df_chart['Close'].dropna()
+    if valid_closes.empty: return
+    curr_p = valid_closes.iloc[-1]
+    
     if market_type == "TW": color = "#ef4444" if curr_p >= prev_close else "#10b981"
     else: color = "#10b981" if curr_p >= prev_close else "#ef4444"
     
-    y_min = min(df_chart['Close'].min(), prev_close)
-    y_max = max(df_chart['Close'].max(), prev_close)
+    y_min = min(valid_closes.min(), prev_close)
+    y_max = max(valid_closes.max(), prev_close)
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
-    # 鎖死 X 軸 Domain，保證時間刻度精準不變形
     base = alt.Chart(df_chart).encode(
+        # 鎖死 X 軸 Domain，保證時間刻度精準落在實體位置
         x=alt.X('Time:T', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
     
@@ -582,6 +575,7 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
+# 🚀 終極修復：個股走勢圖同樣鎖死 09:00 ~ 13:30 時間軸！
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -591,22 +585,20 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     last_date = chart_df.index[-1].date()
     chart_df = chart_df[chart_df.index.date == last_date]
     
-    chart_df = chart_df.resample('1min').asfreq()
-    missing_mask = chart_df['Close'].isna()
-    chart_df = chart_df.ffill()
-    chart_df.loc[missing_mask, 'Volume'] = 0
+    # 補點填縫
+    chart_df = chart_df.resample('1min').ffill()
     
     if is_us:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
-        chart_df = chart_df.between_time('09:30', '16:00')
     else:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
-        chart_df = chart_df.between_time('09:00', '13:30')
+    
+    # 強制重塑全天候的 Index
+    full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
+    chart_df = chart_df.reindex(full_index)
         
-    if chart_df.empty: return
-
     chart_df.index.name = 'Time'
     chart_df = chart_df.reset_index()
     chart_df['現價'] = chart_df['Close']
@@ -615,7 +607,8 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if 'VWAP' in df_1m.columns:
         vwap_clean = df_1m['VWAP'].replace(0, np.nan).bfill().fillna(df_1m['Close'])
         vwap_df = vwap_clean.tz_convert(tz_str).resample('1min').ffill()
-        chart_df['當日VWAP(均線)'] = vwap_df.loc[chart_df['Time']].values
+        # 把 VWAP mapping 到全新的 full day index 上
+        chart_df['當日VWAP(均線)'] = vwap_df.reindex(full_index).values
         color_domain.append('當日VWAP(均線)'); color_range.append('#f59e0b')
 
     df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
@@ -675,6 +668,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
+# 🚀 終極修復：K 線圖同樣鎖死 09:00 ~ 13:30 時間軸 (使用重塑資料點數量控制 X 軸長度)
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -690,44 +684,77 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         freq_map = {"1K": "1min", "5K": "5min", "15K": "15min"}
         freq = freq_map.get(tf, "1min")
         
-        df_chart = df_chart.resample(freq).asfreq()
-        missing_mask = df_chart['Close'].isna()
-        df_chart = df_chart.ffill()
-        df_chart.loc[missing_mask, 'Volume'] = 0
+        # 先補齊現有資料的空洞
+        df_chart = df_chart.resample(freq).ffill()
         
-        if is_us: df_chart = df_chart.between_time('09:30', '16:00')
-        else: df_chart = df_chart.between_time('09:00', '13:30')
+        # 把最新價格覆蓋到最後一根有資料的 K 棒
+        if curr_p is not None and not df_chart.empty:
+            last_valid_idx = df_chart['Close'].last_valid_index()
+            if last_valid_idx:
+                df_chart.at[last_valid_idx, 'Close'] = curr_p
+                if curr_p > df_chart.at[last_valid_idx, 'High']: df_chart.at[last_valid_idx, 'High'] = curr_p
+                if curr_p < df_chart.at[last_valid_idx, 'Low']: df_chart.at[last_valid_idx, 'Low'] = curr_p
         
-    if curr_p is not None and not df_chart.empty:
-        last_idx = df_chart.index[-1]
-        df_chart.at[last_idx, 'Close'] = curr_p
-        if curr_p > df_chart.at[last_idx, 'High']: df_chart.at[last_idx, 'High'] = curr_p
-        if curr_p < df_chart.at[last_idx, 'Low']: df_chart.at[last_idx, 'Low'] = curr_p
+        # 先算 MA (避免未來的 NaN 破壞 MA 算法)
+        df_chart['MA3'] = df_chart['Close'].rolling(3).mean()
+        df_chart['MA5'] = df_chart['Close'].rolling(5).mean()
+        df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
+        df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
         
-    df_chart['MA3'] = df_chart['Close'].rolling(3).mean()
-    df_chart['MA5'] = df_chart['Close'].rolling(5).mean()
-    df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
-    df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
-    
-    df_chart.index.name = 'Time'
-    df_chart = df_chart.reset_index()
-    
+        # 再強制擴充到全天候時間表 (這會在後面加上滿滿的 NaN)
+        last_date = df_chart.index.dropna()[-1].date()
+        if is_us:
+            start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
+            end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
+        else:
+            start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
+            end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
+            
+        full_index = pd.date_range(start=start_time, end=end_time, freq=freq)
+        df_chart = df_chart.reindex(full_index)
+        
+        df_chart.index.name = 'Time'
+        df_chart = df_chart.reset_index()
+        
+        start_idx = 0
+        end_idx = len(df_chart) - 1
+    else:
+        if curr_p is not None and not df_chart.empty:
+            last_idx = df_chart.index[-1]
+            df_chart.at[last_idx, 'Close'] = curr_p
+            if curr_p > df_chart.at[last_idx, 'High']: df_chart.at[last_idx, 'High'] = curr_p
+            if curr_p < df_chart.at[last_idx, 'Low']: df_chart.at[last_idx, 'Low'] = curr_p
+            
+        df_chart['MA3'] = df_chart['Close'].rolling(3).mean()
+        df_chart['MA5'] = df_chart['Close'].rolling(5).mean()
+        df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
+        df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
+        
+        df_chart.index.name = 'Time'
+        df_chart = df_chart.reset_index()
+        
+        start_idx = max(0, len(df_chart) - 60)
+        end_idx = len(df_chart) - 1
+
     if df_chart.empty: return
 
     df_chart['x_idx'] = np.arange(len(df_chart))
     axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
     df_chart['TimeStr'] = df_chart['Time'].dt.strftime(axis_format)
     
-    start_idx = max(0, len(df_chart) - 60)
-    end_idx = len(df_chart) - 1
+    # 算 Y 軸極值時，排除 NaN 的未來時間點
+    valid_lows = df_chart['Low'].dropna()
+    valid_highs = df_chart['High'].dropna()
+    y_min = valid_lows.min() * 0.995 if not valid_lows.empty else 0
+    y_max = valid_highs.max() * 1.005 if not valid_highs.empty else 100
     
-    y_min = df_chart['Low'].min() * 0.995; y_max = df_chart['High'].max() * 1.005
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
     
     pan_zoom = alt.selection_interval(bind='scales', encodings=['x'])
     
     base = alt.Chart(df_chart).encode(
+        # 鎖死 X 軸領域 (0 到 當日最大K棒數)，保證寬度不變形
         x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[start_idx, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False))
     )
     
@@ -802,11 +829,16 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     ).properties(height=60)
 
     def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
+    
+    # 尋找最後一筆有效的 MA 數值顯示，避免讀到未來的 NaN
+    valid_ma_df = df_chart.dropna(subset=['Close'])
+    last_idx = valid_ma_df.index[-1] if not valid_ma_df.empty else -1
+    
     ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
-    if "MA3" in visible_layers: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[-1])}</span> &nbsp; "
-    if "MA5" in visible_layers: ma_info += f"<span style='color:#3b82f6; font-weight:bold;'>MA5: {format_ma(df_chart['MA5'].iloc[-1])}</span> &nbsp; "
-    if "MA10" in visible_layers: ma_info += f"<span style='color:#a855f7; font-weight:bold;'>MA10: {format_ma(df_chart['MA10'].iloc[-1])}</span> &nbsp; "
-    if "MA23" in visible_layers: ma_info += f"<span style='color:#ec4899; font-weight:bold;'>MA23: {format_ma(df_chart['MA23'].iloc[-1])}</span>"
+    if "MA3" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[last_idx])}</span> &nbsp; "
+    if "MA5" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#3b82f6; font-weight:bold;'>MA5: {format_ma(df_chart['MA5'].iloc[last_idx])}</span> &nbsp; "
+    if "MA10" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#a855f7; font-weight:bold;'>MA10: {format_ma(df_chart['MA10'].iloc[last_idx])}</span> &nbsp; "
+    if "MA23" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#ec4899; font-weight:bold;'>MA23: {format_ma(df_chart['MA23'].iloc[last_idx])}</span>"
     ma_info += "</div>"
     st.markdown(ma_info, unsafe_allow_html=True)
 
