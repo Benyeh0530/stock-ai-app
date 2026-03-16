@@ -166,7 +166,6 @@ def cb_remove_us(idx): st.session_state.us_stocks.pop(idx); save_watchlist(st.se
 def cb_clear_all():
     st.session_state.tw_stocks = []; st.session_state.us_stocks = []; st.session_state.ai_report_daytrade = None; st.session_state.ai_report_overnight = None; st.session_state.ai_report_swing = None; st.session_state.ai_report_us = None; save_watchlist([], [])
 
-# 🚀 AI 算價神級催眠 Bypass
 def cb_ai_calc_price_tw(idx, code, curr_p):
     if not API_KEY: return
     try:
@@ -228,34 +227,42 @@ if 'initialized' not in st.session_state:
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
+# 🚀 修復：擴充興櫃股票庫，讓 77XX 開頭的股票也能被搜尋到
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
-        res = requests.get(url, timeout=8).json()
+        res = requests.get(url, timeout=5, headers=headers).json()
         if res.get('msg') == 'success':
             for item in res['data']: db[str(item['stock_id'])] = str(item['stock_name'])
             if db: return db
     except: pass
+    
+    # 若 FinMind 失敗，改用台灣證交所與櫃買中心備援 (包含興櫃)
     try:
-        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False)
+        res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
         if res_tw.status_code == 200:
             for item in res_tw.json(): db[item['Code']] = item['Name']
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False)
+            
+        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
         if res_otc.status_code == 200:
             for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
+            
+        # 加上興櫃股票，確保搜尋不會有死角
+        res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
+        if res_emg.status_code == 200:
+            for item in res_emg.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
     except: pass
     return db
 
-# 🚀 終極無敵雙層備援機制：加入 006201.TWO 富櫃50 影子替身術！
 @st.cache_data(ttl=2, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
     q_curr = q_prev = None
     
-    # 資料流 1：解耦的 Quote (絕對精準，不依賴歷史 K 線)
     try:
         q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
         q_res = requests.get(q_url, headers=headers, timeout=2).json()
@@ -265,7 +272,6 @@ def get_index_data_engine(symbol, cache_buster):
             q_prev = res_list[0].get('regularMarketPreviousClose')
     except: pass
     
-    # 資料流 2：解耦的 K 線圖 (專門負責畫圖)
     intervals_to_try = [('1m', '1d'), ('5m', '5d')]
     for interval, rng in intervals_to_try:
         try:
@@ -287,7 +293,6 @@ def get_index_data_engine(symbol, cache_buster):
                         break 
         except: continue
         
-    # 🌟 神級替身術：如果 Yahoo 真的把 ^TWOII 封鎖了，我們呼叫影子替身 006201.TWO (富櫃50ETF) 來畫圖！
     if symbol == '^TWOII' and df_spark.empty:
         try:
             proxy_url = f"https://query1.finance.yahoo.com/v8/finance/chart/006201.TWO?interval=1m&range=1d&_t={int(time.time())}"
@@ -302,13 +307,11 @@ def get_index_data_engine(symbol, cache_buster):
                     last_date = df_all['Date'].iloc[-1]
                     df_spark = df_all[df_all['Date'] == last_date].copy()
                     df_spark.drop(columns=['Date'], inplace=True)
-                    # 依比例還原 ETF 刻度到大盤刻度，讓圖表完美呈現
                     if q_prev and not df_spark.empty:
                         scale_factor = q_prev / df_spark['Close'].iloc[0]
                         df_spark['Close'] = df_spark['Close'] * scale_factor
         except: pass
 
-    # 確保資料完整性
     if q_curr is None and not df_spark.empty: q_curr = df_spark['Close'].iloc[-1]
     if q_prev is None: q_prev = q_curr
     
@@ -423,7 +426,6 @@ def get_single_live_price(code, is_us, cache_buster):
         except: pass
     return None, None
 
-# 🚀 終極 SQL 資料庫催眠法：絕對不准輸出假代碼與高價股！
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
     if not API_KEY: return None
@@ -482,13 +484,30 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-def render_index_sparkline(df, prev_close):
+# 🚀 終極修復：強制將 X 軸鎖死在 09:00 ~ 13:30，完美重現券商真實比例的走勢圖
+def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
-    df_chart['x_idx'] = np.arange(len(df_chart))
+    
+    tz_str = 'Asia/Taipei' if market_type == "TW" else 'America/New_York'
+    df_chart['Time'] = df_chart.index.tz_convert(tz_str)
+    
+    last_date = df_chart['Time'].iloc[-1].date()
+    
+    # 建立固定的 X 軸時間範圍，避免畫布被壓縮
+    if market_type == "TW":
+        start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
+        end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
+    else:
+        start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
+        end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
+        
+    df_chart = df_chart[(df_chart['Time'] >= start_time) & (df_chart['Time'] <= end_time)]
+    if df_chart.empty: return
     
     curr_p = df_chart['Close'].iloc[-1]
-    color = "#ef4444" if curr_p >= prev_close else "#10b981"
+    if market_type == "TW": color = "#ef4444" if curr_p >= prev_close else "#10b981"
+    else: color = "#10b981" if curr_p >= prev_close else "#ef4444"
     
     y_min = min(df_chart['Close'].min(), prev_close)
     y_max = max(df_chart['Close'].max(), prev_close)
@@ -497,7 +516,8 @@ def render_index_sparkline(df, prev_close):
     y_max += buffer
     
     base = alt.Chart(df_chart).encode(
-        x=alt.X('x_idx:Q', axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
+        # 鎖死 X 軸領域，即使只有 1 小時的資料，圖表也會精準落在對應位置！
+        x=alt.X('Time:T', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
     
     line = base.mark_line(color=color, strokeWidth=2).encode(
@@ -826,7 +846,7 @@ live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_c
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-# 🚀 執行終極備援：代碼改回 ^TWOII，且若查無圖表自動啟用替身 006201.TWO
+# 🚀 執行終極備援：代碼改回正確的 ^TWOII，且若查無圖表自動啟用替身 006201.TWO
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
 df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
 _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
@@ -836,7 +856,7 @@ with col_t1:
         diff = curr_twii - prev_twii
         pct = diff / prev_twii * 100
         st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii)
+        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii, "TW")
         else: st.caption("走勢圖暫無資料")
     else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
 
@@ -845,7 +865,7 @@ with col_t2:
         diff = curr_twoii - prev_twoii
         pct = diff / prev_twoii * 100
         st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
-        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii)
+        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii, "TW")
         else: st.caption("⚠️ Yahoo 暫無上櫃分K")
     else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
 
