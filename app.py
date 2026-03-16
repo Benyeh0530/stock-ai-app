@@ -227,7 +227,6 @@ if 'initialized' not in st.session_state:
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
-# 🚀 修復：擴充興櫃股票庫，讓 77XX 開頭的股票也能被搜尋到
 @st.cache_data(ttl=86400)
 def get_full_stock_db():
     db = {}
@@ -240,7 +239,6 @@ def get_full_stock_db():
             if db: return db
     except: pass
     
-    # 若 FinMind 失敗，改用台灣證交所與櫃買中心備援 (包含興櫃)
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
         if res_tw.status_code == 200:
@@ -250,7 +248,6 @@ def get_full_stock_db():
         if res_otc.status_code == 200:
             for item in res_otc.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
             
-        # 加上興櫃股票，確保搜尋不會有死角
         res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
         if res_emg.status_code == 200:
             for item in res_emg.json(): db[item['SecuritiesCompanyCode']] = item['CompanyName']
@@ -484,7 +481,6 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-# 🚀 終極修復：強制將 X 軸鎖死在 09:00 ~ 13:30，完美重現券商真實比例的走勢圖
 def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
@@ -493,8 +489,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     df_chart['Time'] = df_chart.index.tz_convert(tz_str)
     
     last_date = df_chart['Time'].iloc[-1].date()
-    
-    # 建立固定的 X 軸時間範圍，避免畫布被壓縮
     if market_type == "TW":
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
@@ -512,11 +506,9 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     y_min = min(df_chart['Close'].min(), prev_close)
     y_max = max(df_chart['Close'].max(), prev_close)
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
-    y_min -= buffer
-    y_max += buffer
+    y_min -= buffer; y_max += buffer
     
     base = alt.Chart(df_chart).encode(
-        # 鎖死 X 軸領域，即使只有 1 小時的資料，圖表也會精準落在對應位置！
         x=alt.X('Time:T', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
     )
     
@@ -540,28 +532,43 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
+# 🚀 終極修復：加入 Resample 填縫，解決游標輕滑跳動的問題！
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
-    chart_df['Time'] = chart_df.index.tz_convert(tz_str)
-    chart_df['現價'] = chart_df['Close']
+    chart_df.index = chart_df.index.tz_convert(tz_str)
     
-    latest_time = chart_df['Time'].iloc[-1]
+    last_date = chart_df.index[-1].date()
+    chart_df = chart_df[chart_df.index.date == last_date]
+    
+    # 補點填縫演算法：強行補齊沒有成交量的分鐘，確保 X 軸比例尺絕對平滑
+    chart_df = chart_df.resample('1min').asfreq()
+    missing_mask = chart_df['Close'].isna()
+    chart_df = chart_df.ffill()
+    chart_df.loc[missing_mask, 'Volume'] = 0
+    
     if is_us:
-        start_time = latest_time.replace(hour=9, minute=30, second=0, microsecond=0)
-        end_time = latest_time.replace(hour=16, minute=0, second=0, microsecond=0)
+        start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
+        end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
+        chart_df = chart_df.between_time('09:30', '16:00')
     else:
-        start_time = latest_time.replace(hour=9, minute=0, second=0, microsecond=0)
-        end_time = latest_time.replace(hour=13, minute=30, second=0, microsecond=0)
-    
-    chart_df = chart_df[(chart_df['Time'] >= start_time) & (chart_df['Time'] <= end_time)]
+        start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
+        end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
+        chart_df = chart_df.between_time('09:00', '13:30')
+        
     if chart_df.empty: return
+
+    chart_df.index.name = 'Time'
+    chart_df = chart_df.reset_index()
+    chart_df['現價'] = chart_df['Close']
 
     color_domain = ['現價']; color_range = ['#3b82f6']
     if 'VWAP' in df_1m.columns:
+        # VWAP 需要用原始資料算好再映射過來
         vwap_clean = df_1m['VWAP'].replace(0, np.nan).bfill().fillna(df_1m['Close'])
-        chart_df['當日VWAP(均線)'] = vwap_clean.loc[chart_df.index]
+        vwap_df = vwap_clean.tz_convert(tz_str).resample('1min').ffill()
+        chart_df['當日VWAP(均線)'] = vwap_df.loc[chart_df['Time']].values
         color_domain.append('當日VWAP(均線)'); color_range.append('#f59e0b')
 
     df_melted = chart_df.melt(id_vars=['Time', 'Open', 'Close', 'Volume'], var_name='線型', value_name='價格')
@@ -585,16 +592,15 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
     points = line.mark_circle(size=80).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0)), tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]).add_params(hover)
+    
+    # 🚀 價格圖的十字線
     v_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     h_rules = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='價格:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover).transform_filter(alt.datum.線型 == '現價')
 
     alert_layers = []
     if cdp_nh > 0 and cdp_nl > 0:
         cdp_df = pd.DataFrame({'價格': [cdp_nh, cdp_nl], '線型': ['CDP_NH(壓力)', 'CDP_NL(支撐)']})
-        cdp_rule = alt.Chart(cdp_df).mark_rule(strokeWidth=2).encode(
-            y='價格:Q',
-            color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range))
-        )
+        cdp_rule = alt.Chart(cdp_df).mark_rule(strokeWidth=2).encode(y='價格:Q', color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range)))
         alert_layers.append(cdp_rule)
         
     for al in alerts:
@@ -605,15 +611,27 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
-    vol_chart = alt.Chart(chart_df).mark_bar(opacity=0.6).encode(
-        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False)),
-        y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
-        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
-        tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+    
+    # 🚀 將十字垂直線綁定到下方的成交量圖
+    base_vol = alt.Chart(chart_df).encode(
+        x=alt.X('Time:T', title='', scale=alt.Scale(domain=[start_time.isoformat(), end_time.isoformat()]), axis=alt.Axis(labels=False, ticks=False))
+    )
+    v_rules_vol = base_vol.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+    ).transform_filter(hover)
+    
+    vol_chart = alt.layer(
+        base_vol.mark_bar(opacity=0.6).encode(
+            y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
+            tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+        ),
+        v_rules_vol
     ).properties(height=60)
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
+# 🚀 終極修復：K 線圖加入時間補點填縫與全幅十字線聯動
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -622,7 +640,22 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     if df.empty: return
     df_chart = df.copy()
-    
+    tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
+    df_chart.index = df_chart.index.tz_convert(tz_str)
+
+    if tf != "日K":
+        freq_map = {"1K": "1min", "5K": "5min", "15K": "15min"}
+        freq = freq_map.get(tf, "1min")
+        
+        # 補點填縫演算法：強行補齊空檔，確保 X 軸比例尺平滑不斷層
+        df_chart = df_chart.resample(freq).asfreq()
+        missing_mask = df_chart['Close'].isna()
+        df_chart = df_chart.ffill()
+        df_chart.loc[missing_mask, 'Volume'] = 0
+        
+        if is_us: df_chart = df_chart.between_time('09:30', '16:00')
+        else: df_chart = df_chart.between_time('09:00', '13:30')
+        
     if curr_p is not None and not df_chart.empty:
         last_idx = df_chart.index[-1]
         df_chart.at[last_idx, 'Close'] = curr_p
@@ -634,17 +667,9 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
     df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
     
-    tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
-    df_chart['Time'] = df_chart.index.tz_convert(tz_str)
+    df_chart.index.name = 'Time'
+    df_chart = df_chart.reset_index()
     
-    if tf != "日K":
-        df_chart = df_chart.set_index('Time')
-        if is_us: df_chart = df_chart.between_time('09:30', '16:00')
-        else: df_chart = df_chart.between_time('09:00', '13:30')
-        df_chart = df_chart.reset_index()
-    else:
-        df_chart = df_chart.reset_index(drop=True)
-        
     if df_chart.empty: return
 
     df_chart['x_idx'] = np.arange(len(df_chart))
@@ -708,6 +733,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         tooltip=tooltip_data
     ).add_params(hover)
 
+    # 🚀 價格圖的十字線
     v_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0))
     ).transform_filter(hover)
@@ -721,9 +747,17 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
     main_kline = alt.layer(*layers).properties(height=200).add_params(pan_zoom)
 
-    vol_chart = base.mark_bar(opacity=0.6).encode(
-        y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
-        color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
+    # 🚀 綁定相同 hover 參數到成交量圖
+    v_rule_vol = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(
+        opacity=alt.condition(hover, alt.value(1), alt.value(0))
+    ).transform_filter(hover)
+
+    vol_chart = alt.layer(
+        base.mark_bar(opacity=0.6).encode(
+            y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color))
+        ),
+        v_rule_vol
     ).properties(height=60)
 
     def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
@@ -753,7 +787,7 @@ with st.sidebar:
             cb_add_tw(code, name); st.rerun()
 
     with st.expander("🛠️ 找不到？手動強制加入"):
-        tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330)").strip()
+        tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330, 興櫃為4碼數字)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
             if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
@@ -846,7 +880,6 @@ live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_c
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
-# 🚀 執行終極備援：代碼改回正確的 ^TWOII，且若查無圖表自動啟用替身 006201.TWO
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
 df_twoii, curr_twoii, prev_twoii = get_index_data_engine('^TWOII', fast_cache_key)
 _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
