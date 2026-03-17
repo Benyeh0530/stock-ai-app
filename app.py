@@ -240,7 +240,6 @@ if 'initialized' not in st.session_state:
     st.session_state.initialized = True
 
 # --- 2. 數據引擎 ---
-# 🚀 終極修復：防快取毒化機制 (Cache Poisoning Prevention)
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
@@ -273,13 +272,10 @@ def get_full_stock_db():
                 if code not in db: db[code] = str(item['stock_name'])
     except: pass
     
-    # 防呆防空值：如果抓不到100檔，直接清除快取，讓下次重新抓取，絕不卡死 24 小時！
-    if len(db) < 100:
-        get_full_stock_db.clear()
-        
+    if len(db) < 100: get_full_stock_db.clear()
     return db
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
@@ -337,6 +333,10 @@ def get_index_data_engine(symbol, cache_buster):
     if q_curr is None and not df_spark.empty: q_curr = df_spark['Close'].iloc[-1]
     if q_prev is None: q_prev = q_curr
     
+    # 💉 【實時注入器】將最新的高頻報價強行打入走勢圖的末端，讓折線隨數字即時跳動！
+    if q_curr is not None and not df_spark.empty:
+        df_spark.iloc[-1, df_spark.columns.get_loc('Close')] = q_curr
+    
     return df_spark, q_curr, q_prev
 
 @st.cache_data(ttl=300)
@@ -392,7 +392,7 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -404,8 +404,9 @@ def get_realtime_tick(code, suffix, cache_buster):
         return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
-def get_bulk_spark_prices(tw_codes, us_codes, cache_buster):
+# 🚀 終極修復：拔除延遲嚴重的 Spark API，改接 /v7/quote 毫秒級報價管線！
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
+def get_bulk_live_prices(tw_codes, us_codes, cache_buster):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
     for c in us_codes: symbols.append(c)
@@ -417,36 +418,32 @@ def get_bulk_spark_prices(tw_codes, us_codes, cache_buster):
         chunk = symbols[i:i + chunk_size]
         sym_str = ",".join(chunk)
         try:
-            url = f"https://query2.finance.yahoo.com/v8/finance/spark?symbols={sym_str}&range=1d&_t={int(time.time())}"
-            res = requests.get(url, headers=headers, timeout=5).json()
-            results = res.get('spark', {}).get('result', [])
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym_str}&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=3).json()
+            results = res.get('quoteResponse', {}).get('result', [])
             for r in results:
                 sym = r.get('symbol', '')
                 base_sym = sym.replace('.TW', '').replace('.TWO', '')
-                resp_list = r.get('response', [])
-                if resp_list:
-                    meta = resp_list[0].get('meta', {})
-                    curr_p = meta.get('regularMarketPrice')
-                    prev_p = meta.get('chartPreviousClose', meta.get('previousClose', curr_p))
-                    if curr_p is not None: prices[base_sym] = (curr_p, prev_p)
+                curr_p = r.get('regularMarketPrice')
+                prev_p = r.get('regularMarketPreviousClose', curr_p)
+                if curr_p is not None: 
+                    prices[base_sym] = (curr_p, prev_p)
         except: pass
     return prices
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_single_live_price(code, is_us, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     suffixes = [""] if is_us else [".TW", ".TWO"]
     for suf in suffixes:
         try:
-            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{code}{suf}?interval=1d&range=5d&_t={int(time.time())}"
-            res_1d = requests.get(url_1d, headers=headers, timeout=2).json()
-            res_data = res_1d.get('chart', {}).get('result', [])[0]
-            closes = res_data['indicators']['quote'][0]['close']
-            valid_closes = [c for c in closes if c is not None]
-            if len(valid_closes) >= 2:
-                return valid_closes[-1], valid_closes[-2]
-            elif len(valid_closes) == 1:
-                return valid_closes[0], valid_closes[0]
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            res_list = res.get('quoteResponse', {}).get('result', [])
+            if res_list:
+                cp = res_list[0].get('regularMarketPrice')
+                pp = res_list[0].get('regularMarketPreviousClose', cp)
+                if cp is not None: return cp, pp
         except: pass
     return None, None
 
@@ -508,7 +505,6 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
 
 # --- 📊 視覺圖表引擎 ---
 
-# 🚀 終極修復：完美鎖定大盤走勢的 09:00 ~ 13:30 X軸，確保盤中圖表只顯示實際進度不被拉伸
 def render_index_sparkline(df, prev_close, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
@@ -519,7 +515,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     last_date = df_chart.index[-1].date()
     df_chart = df_chart[df_chart.index.date == last_date]
     
-    # 補點填縫：確保每分鐘都有一個資料點
     df_chart = df_chart.resample('1min').ffill()
     
     if market_type == "TW":
@@ -529,7 +524,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
     
-    # 強制重塑全天候的 Index，右側未來時間會自動填入 NaN，Altair 就不會畫線，保持完美空白！
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     df_chart = df_chart.reindex(full_index)
         
@@ -537,7 +531,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     df_chart = df_chart.reset_index()
     df_chart['x_idx'] = np.arange(len(df_chart))
     
-    # 找出最後一筆有效報價來決定顏色
     valid_closes = df_chart['Close'].dropna()
     if valid_closes.empty: return
     curr_p = valid_closes.iloc[-1]
@@ -550,7 +543,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
-    # 鎖死 X 軸 Domain，保證時間刻度長度絕對精準
     end_idx = len(df_chart) - 1
     base = alt.Chart(df_chart).encode(
         x=alt.X('x_idx:Q', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False, title=''))
@@ -576,7 +568,6 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
-# 🚀 終極修復：個股走勢圖同樣鎖死 09:00 ~ 13:30 時間軸，不拉伸！
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -598,7 +589,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
     
-    # 強制重塑全天候的 Index
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     chart_df = chart_df.reindex(full_index)
         
@@ -846,27 +836,33 @@ with st.sidebar:
     
     st.header("🎯 1. 自訂監控加入")
     all_stocks = get_full_stock_db()
-    if all_stocks: stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
-    else: stock_list = ["伺服器連線異常，請點擊下方重新載入按鈕"]
-
-    selected_tw = st.selectbox("🔍 搜尋台股代碼", options=["請點此搜尋..."] + stock_list, index=0)
-    if selected_tw != "請點此搜尋..." and "伺服器連線異常" not in selected_tw:
-        parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
-        if st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}"):
-            cb_add_tw(code, name); st.rerun()
+    
+    if all_stocks:
+        stock_list = [f"{code} {name}" for code, name in all_stocks.items()]
+        selected_tw = st.selectbox("🔍 搜尋台股代碼 (下拉或輸入)", options=["請點此搜尋..."] + stock_list, index=0)
+        if selected_tw != "請點此搜尋...":
+            parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
+            if st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}"):
+                cb_add_tw(code, name); st.rerun()
+    else:
+        st.error("⚠️ 證交所 API 暫時阻擋雲端主機，下拉選單無法載入。請直接使用下方【手動加入】。")
+        if st.button("🔄 重新嘗試連線", use_container_width=True):
+            get_full_stock_db.clear()
+            st.rerun()
 
     with st.expander("🛠️ 找不到？手動強制加入"):
-        # 🚀 滿血復活按鈕：一鍵解除 API 快取毒化，找回全部股票
+        # 🚀 新增手動重置按鈕，萬一下拉選單沒股票，戳一下就能重新抓取
         if st.button("🔄 重新載入股票清單 (解決連線異常)", use_container_width=True):
             get_full_stock_db.clear()
             st.rerun()
             
-        tw_code = st.text_input("🇹🇼 手動輸入台股代碼 (如 2330, 興櫃為4碼數字)").strip()
+        tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330, 9933)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
             if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
                 cb_add_tw(tw_code, tw_name); st.rerun()
 
+    st.markdown("---")
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if us_code: 
         if st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}"):
@@ -954,7 +950,8 @@ all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
 us_set = set([s['code'] for s in st.session_state.us_stocks])
 all_us_to_fetch = tuple(us_set)
 
-live_price_dict = get_bulk_spark_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
+# 🚀 使用最新最速的報價引擎
+live_price_dict = get_bulk_live_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 
@@ -1068,6 +1065,10 @@ with tab_tw:
             
         if curr_p is None: curr_p = 0.0
         if prev_p is None: prev_p = curr_p
+            
+        # 🚀 強制將現價打入即時 K 線圖
+        if curr_p is not None and not df_1m.empty:
+            df_1m.iloc[-1, df_1m.columns.get_loc('Close')] = curr_p
             
         if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
         if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
@@ -1348,6 +1349,10 @@ with tab_us:
             
         if curr_p is None: curr_p = 0.0
         if prev_p is None: prev_p = curr_p
+        
+        # 🚀 強制將現價打入即時 K 線圖
+        if curr_p is not None and not df_1m_us.empty:
+            df_1m_us.iloc[-1, df_1m_us.columns.get_loc('Close')] = curr_p
             
         if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
         if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
