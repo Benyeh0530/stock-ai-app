@@ -244,7 +244,6 @@ if 'initialized' not in st.session_state:
 def get_full_stock_db():
     db = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = requests.get(url, timeout=10, headers=headers).json()
@@ -252,46 +251,36 @@ def get_full_stock_db():
             for item in res['data']: 
                 db[str(item['stock_id'])] = str(item['stock_name'])
     except: pass
-    
     try:
         res_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5, verify=False, headers=headers)
         if res_tw.status_code == 200:
             for item in res_tw.json(): db[str(item['Code'])] = str(item['Name'])
     except: pass
-    
     try:
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5, verify=False, headers=headers)
         if res_otc.status_code == 200:
             for item in res_otc.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
-    
     try:
         res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emerging_quotes", timeout=5, verify=False, headers=headers)
         if res_emg.status_code == 200:
             for item in res_emg.json(): db[str(item['SecuritiesCompanyCode'])] = str(item['CompanyName'])
     except: pass
-    
     if len(db) < 100: get_full_stock_db.clear()
     return db
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+# 🚀 終極心跳重啟：強制破除快取，讓大盤跟著實時心電圖跳動
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_index_data_engine(symbol, cache_buster):
     headers = {"User-Agent": "Mozilla/5.0"}
     df_spark = pd.DataFrame()
     q_curr = q_prev = None
     
-    try:
-        q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
-        q_res = requests.get(q_url, headers=headers, timeout=2).json()
-        res_list = q_res.get('quoteResponse', {}).get('result', [])
-        if res_list:
-            q_curr = res_list[0].get('regularMarketPrice')
-            q_prev = res_list[0].get('regularMarketPreviousClose')
-    except: pass
-    
+    # 1. 抓取 v8/chart，優先用 1d 觸發 Yahoo 即時交易伺服器！
     intervals_to_try = [('1m', '1d'), ('5m', '5d')]
     for interval, rng in intervals_to_try:
         try:
+            # 絕對釘死 _t 快取破壞器，強迫 Yahoo 給最新一秒的資料
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}&_t={int(time.time())}"
             res = requests.get(url, headers=headers, timeout=2).json()
             result = res.get('chart', {}).get('result', [])
@@ -307,9 +296,15 @@ def get_index_data_engine(symbol, cache_buster):
                         last_date = df_all['Date'].iloc[-1]
                         df_spark = df_all[df_all['Date'] == last_date].copy()
                         df_spark.drop(columns=['Date'], inplace=True)
+                        
+                        # 從活體圖表中抽出最尾端的現價，這比報價 API 還即時！
+                        q_curr = df_spark['Close'].iloc[-1]
+                        # 抽出昨收
+                        q_prev = result[0].get('meta', {}).get('chartPreviousClose', result[0].get('meta', {}).get('previousClose'))
                         break 
         except: continue
         
+    # 2. 上櫃 006201 替身術
     if symbol == '^TWOII' and df_spark.empty:
         try:
             proxy_url = f"https://query1.finance.yahoo.com/v8/finance/chart/006201.TWO?interval=1m&range=1d&_t={int(time.time())}"
@@ -324,17 +319,27 @@ def get_index_data_engine(symbol, cache_buster):
                     last_date = df_all['Date'].iloc[-1]
                     df_spark = df_all[df_all['Date'] == last_date].copy()
                     df_spark.drop(columns=['Date'], inplace=True)
-                    if q_prev and not df_spark.empty:
-                        scale_factor = q_prev / df_spark['Close'].iloc[0]
-                        df_spark['Close'] = df_spark['Close'] * scale_factor
+                    # 替身只用來畫圖，絕對不能覆蓋大盤點數 q_curr
         except: pass
 
-    if q_curr is None and not df_spark.empty: q_curr = df_spark['Close'].iloc[-1]
+    # 3. 備援防護：如果圖表真的壞了，再退回去用 v7/quote
+    if q_curr is None or q_prev is None:
+        try:
+            q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
+            q_res = requests.get(q_url, headers=headers, timeout=2).json()
+            res_list = q_res.get('quoteResponse', {}).get('result', [])
+            if res_list:
+                if q_curr is None: q_curr = res_list[0].get('regularMarketPrice')
+                if q_prev is None: q_prev = res_list[0].get('regularMarketPreviousClose')
+        except: pass
+
+    # 4. 如果用到替身畫圖，還原替身的 Y 軸刻度
+    if symbol == '^TWOII' and not df_spark.empty and q_prev:
+        scale_factor = q_prev / df_spark['Close'].iloc[0]
+        df_spark['Close'] = df_spark['Close'] * scale_factor
+
     if q_prev is None: q_prev = q_curr
     
-    if q_curr is not None and not df_spark.empty:
-        df_spark.iloc[-1, df_spark.columns.get_loc('Close')] = q_curr
-        
     return df_spark, q_curr, q_prev
 
 @st.cache_data(ttl=300)
@@ -390,56 +395,31 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+# 🚀 終極個股圖表重啟：破除 CDN 延遲詛咒，強制抓即時 1d
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_realtime_tick(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame()
     headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range=5d&_t={int(time.time())}"
-        res_1m = requests.get(url, headers=headers, timeout=3).json()
-        idx_1m = pd.to_datetime(res_1m['chart']['result'][0]['timestamp'], unit='s', utc=True)
-        q = res_1m['chart']['result'][0]['indicators']['quote'][0]
-        return pd.DataFrame({'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 'Volume': q['volume']}, index=idx_1m).dropna()
-    except: return pd.DataFrame()
-
-# 🚀 終極修復：聯動股專屬的高速報價引擎 (防陣列越界、防靜音崩潰)
-@st.cache_data(ttl=2, max_entries=100, show_spinner=False)
-def get_single_live_price(code, is_us, cache_buster):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    suffixes = [""] if is_us else [".TW", ".TWO"]
-    
-    for suf in suffixes:
-        sym = f"{code}{suf}"
-        # 優先層：使用 /v7/quote 最快速取得單一個股的最新報價與昨收 (絕不依賴 K 線圖長度)
+    # 先強迫抓 1d (即時伺服器)，如果失敗才抓 5d (延遲倉庫)
+    for rng in ['1d', '5d']:
         try:
-            q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym}&_t={int(time.time())}"
-            q_res = requests.get(q_url, headers=headers, timeout=2).json()
-            res_list = q_res.get('quoteResponse', {}).get('result', [])
-            if res_list:
-                cp = res_list[0].get('regularMarketPrice')
-                pp = res_list[0].get('regularMarketPreviousClose', cp) 
-                if cp is not None and pp is not None:
-                    return cp, pp
+            # 釘死時間戳記破除快取！
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}?interval=1m&range={rng}&_t={int(time.time())}"
+            res_1m = requests.get(url, headers=headers, timeout=3).json()
+            result = res_1m.get('chart', {}).get('result', [])
+            if result and result[0].get('timestamp'):
+                idx_1m = pd.to_datetime(result[0]['timestamp'], unit='s', utc=True)
+                q = result[0]['indicators']['quote'][0]
+                df = pd.DataFrame({
+                    'Open': q['open'], 'High': q['high'], 'Low': q['low'], 'Close': q['close'], 
+                    'Volume': q.get('volume', [0]*len(q['close']))
+                }, index=idx_1m).dropna()
+                if not df.empty: 
+                    return df
         except: pass
-        
-        # 備援層：若 quote 掛了，才去拆解 K 線圖，並加入完整防呆
-        try:
-            url_1d = f"https://query2.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d&_t={int(time.time())}"
-            res_1d = requests.get(url_1d, headers=headers, timeout=2).json()
-            result = res_1d.get('chart', {}).get('result', [])
-            if result:
-                closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close', [])
-                valid_closes = [c for c in closes if c is not None]
-                if len(valid_closes) >= 2:
-                    return valid_closes[-1], valid_closes[-2]
-                elif len(valid_closes) == 1:
-                    return valid_closes[0], valid_closes[0]
-        except: pass
-        
-    return None, None
+    return pd.DataFrame()
 
-# 🚀 使用高速報價引擎取得首頁主清單的報價
-@st.cache_data(ttl=2, max_entries=10, show_spinner=False)
+@st.cache_data(ttl=1, max_entries=10, show_spinner=False)
 def get_bulk_live_prices(tw_codes, us_codes, cache_buster):
     symbols = []
     for c in tw_codes: symbols.extend([f"{c}.TW", f"{c}.TWO"])
@@ -465,6 +445,21 @@ def get_bulk_live_prices(tw_codes, us_codes, cache_buster):
         except: pass
     return prices
 
+@st.cache_data(ttl=1, max_entries=100, show_spinner=False)
+def get_single_live_price(code, is_us, cache_buster):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    suffixes = [""] if is_us else [".TW", ".TWO"]
+    for suf in suffixes:
+        try:
+            url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}{suf}&_t={int(time.time())}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            res_list = res.get('quoteResponse', {}).get('result', [])
+            if res_list:
+                cp = res_list[0].get('regularMarketPrice')
+                pp = res_list[0].get('regularMarketPreviousClose', cp)
+                if cp is not None: return cp, pp
+        except: pass
+    return None, None
 
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_ai_list(report_type, api_key_hash):
@@ -604,14 +599,10 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     if is_us:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
-        chart_df = chart_df.between_time('09:30', '16:00')
     else:
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
-        chart_df = chart_df.between_time('09:00', '13:30')
-        
-    if chart_df.empty: return
-
+    
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     chart_df = chart_df.reindex(full_index)
         
@@ -878,7 +869,7 @@ with st.sidebar:
             get_full_stock_db.clear()
             st.rerun()
             
-        tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330, 興櫃為4碼數字)").strip()
+        tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330, 9933)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
             if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
