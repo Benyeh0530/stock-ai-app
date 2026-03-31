@@ -10,7 +10,7 @@ from datetime import datetime
 # ==========================================
 # 1. 核心設定 (請替換為您的 ngrok 網址)
 # ==========================================
-LOCAL_AGENT_WEBHOOK = "https://stock-ai-app-ajmfbtg2rjyzaqkabfdmb7.streamlit.app/" 
+LOCAL_AGENT_WEBHOOK = "https://hitless-axel-misapply.ngrok-free.dev/tv_webhook" 
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
 
 TG_BOT_TOKEN = "您的_Telegram_Bot_Token"
