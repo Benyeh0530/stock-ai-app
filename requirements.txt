@@ -1,7 +1,5 @@
 streamlit
-pandas
-google-generativeai
-requests
-pytz
-altair
 pyotp
+requests
+yfinance
+plotly
