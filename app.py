@@ -17,9 +17,8 @@ NGROK_BASE_URL = "https://您的ngrok網址.ngrok-free.app"
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
 
 # ==========================================
-# 2. 雲端雙軌資料庫 (鐵壁備援 + 動態抓取)
+# 2. 雲端全市場地毯式掃描 (上市 + 上櫃 + 興櫃 + 創櫃)
 # ==========================================
-# 核心名單：保證就算政府 API 封鎖雲端 IP，這些重要標的也絕對找得到！
 BASE_STOCKS = {
     "1717": "東聯", "2330": "台積電", "2317": "鴻海", "2454": "聯發科",
     "2603": "長榮", "3037": "欣興", "3017": "奇鋐", "2303": "聯電",
@@ -28,14 +27,14 @@ BASE_STOCKS = {
     "6770": "力積電", "3008": "大立光", "0050": "元大台灣50", "0056": "元大高股息"
 }
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner="📡 正在掃描全台股市場...")
 def fetch_all_stocks():
-    stocks = BASE_STOCKS.copy() # 先載入鐵壁名單
+    stocks = BASE_STOCKS.copy() 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"
     }
     
-    # 嘗試抓取上市 (TWSE)
+    # 1. 掃描上市 (TWSE)
     try:
         res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, verify=False, timeout=5)
         if res_twse.status_code == 200:
@@ -43,11 +42,29 @@ def fetch_all_stocks():
                 if len(item["Code"]) == 4: stocks[item["Code"]] = item["Name"]
     except: pass
 
-    # 嘗試抓取上櫃 (TPEx)
+    # 2. 掃描上櫃 (TPEx Mainboard)
     try:
         res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, verify=False, timeout=5)
         if res_tpex.status_code == 200:
             for item in res_tpex.json():
+                if len(item.get("SecuritiesCompanyCode", "")) == 4: 
+                    stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
+    except: pass
+
+    # 3. 掃描興櫃 (TPEx Emerging) - 解決 77xx 找不到的問題！
+    try:
+        res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emg_quotes", headers=headers, verify=False, timeout=5)
+        if res_emg.status_code == 200:
+            for item in res_emg.json():
+                if len(item.get("SecuritiesCompanyCode", "")) == 4: 
+                    stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
+    except: pass
+
+    # 4. 掃描創櫃 (TPEx GISA) - 徹底補網
+    try:
+        res_gisa = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_gisa_quotes", headers=headers, verify=False, timeout=5)
+        if res_gisa.status_code == 200:
+            for item in res_gisa.json():
                 if len(item.get("SecuritiesCompanyCode", "")) == 4: 
                     stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
     except: pass
@@ -99,14 +116,21 @@ def plot_capital_kline(data_list, title):
 if 'watch_list' not in st.session_state:
     st.session_state['watch_list'] = ["1717"]
 
-# --- 側邊欄：搜尋控制中樞 (回歸左側) ---
 st.sidebar.title("⚙️ 戰情控制台")
+
+# 🚨 防呆：如果只有備用名單，顯示清除快取按鈕
+if len(STOCKS_DICT) < 100:
+    st.sidebar.error("⚠️ 無法連線至政府開放 API！")
+    if st.sidebar.button("🔄 強制重新下載台股清單"):
+        st.cache_data.clear()
+        st.rerun()
+
 st.sidebar.markdown("### 🔍 新增監控標的")
 
 search_options = [f"{k} {v}" for k, v in STOCKS_DICT.items()]
 selected_stock = st.sidebar.selectbox(
-    "全台股模糊搜尋", 
-    ["請點擊並輸入代號/名稱 (例: 鴻海)"] + search_options
+    "全台股模糊搜尋 (包含興櫃)", 
+    ["請點擊並輸入代號/名稱 (例: 776)"] + search_options
 )
 
 if st.sidebar.button("➕ 加入戰情牆", use_container_width=True):
@@ -121,7 +145,7 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔄 刷新全畫面 K 線", use_container_width=True):
     st.rerun()
 
-# --- 主畫面：乾淨的看盤與下單區 ---
+# --- 主畫面 ---
 st.title("📈 AI 穩贏自動化戰情牆")
 st.info("💡 提示：請在左側選單搜尋並新增股票。K 線與下單指令將即時穿透至您的 Windows 本機。")
 st.markdown("---")
