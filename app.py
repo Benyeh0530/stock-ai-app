@@ -15,7 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 NGROK_BASE_URL = "https://您的ngrok網址.ngrok-free.app" 
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
 # ⚠️ 請填入您剛剛在 kvdb.io 取得的 Bucket ID
-KVDB_BUCKET_ID = "填入您的_Bucket_ID"  
+KVDB_BUCKET_ID = "PmpHQWa5QcddYqHfvc8Tp8"  
 
 # ==========================================
 # 2. 雲端全市場動態掃描 (保留上一版設定)
