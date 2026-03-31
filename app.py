@@ -12,12 +12,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==========================================
 # 1. 核心設定
 # ==========================================
-# ⚠️ 請更新為您的 ngrok 網址
 NGROK_BASE_URL = "https://您的ngrok網址.ngrok-free.app" 
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
+# ⚠️ 請填入您剛剛在 kvdb.io 取得的 Bucket ID
+KVDB_BUCKET_ID = "填入您的_Bucket_ID"  
 
 # ==========================================
-# 2. 雲端全市場動態掃描
+# 2. 雲端全市場動態掃描 (保留上一版設定)
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner="📡 正在載入全市場清單...")
 def fetch_all_stocks():
@@ -29,41 +30,51 @@ def fetch_all_stocks():
         if res.status_code == 200:
             for item in res.json().get("data", []):
                 code = str(item.get("stock_id", ""))
-                if len(code) == 4 and code.isdigit():
-                    stocks[code] = item.get("stock_name", "")
+                if len(code) == 4 and code.isdigit(): stocks[code] = item.get("stock_name", "")
     except: pass
     return stocks
 
 STOCKS_DICT = fetch_all_stocks()
 
 # ==========================================
-# 3. 雲端與本機通訊函式
+# 3. 🛡️ 雙軌通訊引擎 (本機優先 -> 雲端備援)
 # ==========================================
-def send_request(endpoint, payload=None):
-    headers = {"ngrok-skip-browser-warning": "true", "Content-Type": "application/json"}
-    url = f"{NGROK_BASE_URL}{endpoint}"
-    if payload:
-        payload["secret"] = WEBHOOK_SECRET
-        return requests.post(url, json=payload, headers=headers, timeout=5)
-    else:
-        return requests.get(url, headers=headers, timeout=5)
-
 def subscribe_local_kline(stock_id):
-    try: send_request("/api/subscribe", {"stock_id": stock_id})
+    try: requests.post(f"{NGROK_BASE_URL}/api/subscribe", json={"secret": WEBHOOK_SECRET, "stock_id": stock_id}, headers={"ngrok-skip-browser-warning": "true"}, timeout=2)
     except: pass
 
-def fetch_kline_from_local(stock_id):
+def fetch_kline(stock_id):
+    """先嘗試連線本機群益，失敗則自動讀取雲端影分身"""
     try:
-        res = send_request(f"/api/kline/{stock_id}")
-        return res.json().get("data", []) if res.status_code == 200 else []
-    except: return []
+        # 嘗試連線地端
+        res = requests.get(f"{NGROK_BASE_URL}/api/kline/{stock_id}", headers={"ngrok-skip-browser-warning": "true"}, timeout=2)
+        if res.status_code == 200 and res.json().get("data"):
+            return res.json().get("data")
+    except:
+        pass
+    
+    # 地端斷線，從雲端拉取昨日群益留下來的資料
+    try:
+        res = requests.get(f"https://kvdb.io/{KVDB_BUCKET_ID}/kline_{stock_id}", timeout=3)
+        if res.status_code == 200:
+            st.toast(f"💻 本機離線，已載入 {stock_id} 雲端群益歷史快取", icon="☁️")
+            return res.json()
+    except: pass
+    return []
 
 def send_alert_config(stock_id, config):
+    """將監控設定送到地端，並同步備份到雲端"""
+    # 1. 永遠寫入雲端 (這樣就算本機關機，明天早上開機也能抓到)
     try:
-        res = send_request("/api/alert_config", {"stock_id": stock_id, "config": config})
-        if res.status_code == 200: st.success("✅ 監控設定已同步至地端引擎！")
-        else: st.error("❌ 同步失敗。")
-    except: st.error("❌ 無法連線至地端。")
+        requests.post(f"https://kvdb.io/{KVDB_BUCKET_ID}/alert_{stock_id}", json=config, timeout=3)
+        st.success("☁️ 監控設定已儲存至雲端資料庫！隔日開機將自動生效。")
+    except:
+        st.error("❌ 雲端儲存失敗。")
+
+    # 2. 嘗試即時通知地端 (如果地端醒著的話)
+    try:
+        requests.post(f"{NGROK_BASE_URL}/api/alert_config", json={"secret": WEBHOOK_SECRET, "stock_id": stock_id, "config": config}, headers={"ngrok-skip-browser-warning": "true"}, timeout=2)
+    except: pass
 
 def plot_capital_kline(data_list):
     if not data_list: return go.Figure()
@@ -83,7 +94,7 @@ if 'watch_list' not in st.session_state: st.session_state['watch_list'] = ["1717
 
 st.sidebar.title("⚙️ 戰情控制台")
 search_options = [f"{k} {v}" for k, v in STOCKS_DICT.items()]
-selected_stock = st.sidebar.selectbox("全台股模糊搜尋 (含興櫃)", ["請點擊並輸入 (例: 776)"] + search_options)
+selected_stock = st.sidebar.selectbox("全台股模糊搜尋", ["請點擊並輸入"] + search_options)
 
 if st.sidebar.button("➕ 加入戰情牆", use_container_width=True):
     if selected_stock and not selected_stock.startswith("請點擊"):
@@ -94,6 +105,7 @@ if st.sidebar.button("➕ 加入戰情牆", use_container_width=True):
             st.rerun()
 
 st.title("📈 AI 穩贏自動化戰情牆")
+st.info("🌙 夜間模式啟動：當地端關機時，圖表將自動讀取群益雲端快取。您仍可自由設定隔日警報！")
 st.markdown("---")
 
 for stock_id in st.session_state['watch_list']:
@@ -108,12 +120,12 @@ for stock_id in st.session_state['watch_list']:
             
         col_chart, col_trade = st.columns([2, 1])
         with col_chart:
-            k_data = fetch_kline_from_local(stock_id)
+            k_data = fetch_kline(stock_id)
             if k_data:
                 st.plotly_chart(plot_capital_kline(k_data), use_container_width=True)
                 last_price = k_data[-1]['Close']
             else:
-                st.warning("⏳ 等待地端 Windows 傳回資料...")
+                st.warning("尚無歷史群益資料，請在地端開機時刷新一次以建立雲端快取。")
                 last_price = 0.0
 
         with col_trade:
@@ -123,11 +135,13 @@ for stock_id in st.session_state['watch_list']:
                 price = st.number_input("價格", value=float(last_price), step=0.05)
                 qty = st.number_input("張數", value=1, min_value=1)
                 if st.form_submit_button("🚀 發射委託"):
-                    send_request("/api/order", {"ticker": stock_id, "action": act, "price": price, "qty": qty})
-                    st.success("指令已送出")
+                    try:
+                        requests.post(f"{NGROK_BASE_URL}/api/order", json={"secret": WEBHOOK_SECRET, "ticker": stock_id, "action": act, "price": price, "qty": qty}, headers={"ngrok-skip-browser-warning": "true"}, timeout=3)
+                        st.success("指令已送出")
+                    except:
+                        st.error("連線失敗，無法送單。")
                     
-        # 🎯 深度監控設定面板
-        with st.expander(f"🔔 {stock_id} 深度監控設定 (到價 TG 警報)"):
+        with st.expander(f"🔔 {stock_id} 深度監控設定 (隔日生效)"):
             c1, c2, c3 = st.columns(3)
             with c1:
                 target_p = st.number_input("自訂到價監控", value=float(last_price), step=0.05, key=f"p_{stock_id}")
@@ -138,7 +152,7 @@ for stock_id in st.session_state['watch_list']:
             with c3:
                 k_times = st.multiselect("多分K監控", ["3M", "5M", "10M", "23M"], key=f"k_{stock_id}")
             
-            if st.button("💾 套用監控設定", key=f"save_{stock_id}"):
+            if st.button("💾 儲存並同步至明日排程", key=f"save_{stock_id}"):
                 config = {"target_price": target_p, "use_cdp": use_cdp, "use_ma20": use_ma, "use_1k": use_1k, "k_times": k_times}
                 send_alert_config(stock_id, config)
                 
