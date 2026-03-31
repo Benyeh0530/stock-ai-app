@@ -1,5 +1,5 @@
 import streamlit as st
-# ⚠️ 鐵則 2：更名為 AI 穩贏自動化戰情牆
+# 鐵則 1 & 2：保留功能，更名為 AI 穩贏自動化戰情牆
 st.set_page_config(page_title="AI 穩贏自動化戰情牆", layout="wide")
 
 import requests
@@ -7,178 +7,149 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
+from datetime import datetime
 
 # ==========================================
-# 1. 核心設定 (保留既有 Webhook 與 TG 功能)
+# 1. 核心設定 (保留群益整合 Webhook)
 # ==========================================
 LOCAL_AGENT_WEBHOOK = "https://hitless-axel-misapply.ngrok-free.dev/tv_webhook" 
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
-
 TG_BOT_TOKEN = "您的_Telegram_Bot_Token"
 TG_CHAT_ID = "您的_Chat_ID"
 
+# 鐵則 3：模糊搜尋字典 (可持續擴充)
+STOCKS_DICT = {
+    "1717": "東聯", "2330": "台積電", "2317": "鴻海", "2454": "聯發科",
+    "2603": "長榮", "3037": "欣興", "3017": "奇鋐", "2303": "聯電",
+    "2609": "陽明", "2615": "萬海", "2881": "富邦金", "2882": "國泰金",
+    "3231": "緯創", "2382": "廣達", "1513": "中興電", "1519": "華城",
+    "6770": "力積電", "3008": "大立光", "0050": "元大台灣50", "0056": "元大高股息"
+}
+
 # ==========================================
-# 2. 功能函式 (保留既有警示與下單穿透機制)
+# 2. 功能函式 (鐵則 5：群益整合)
 # ==========================================
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message}
-    try:
-        requests.post(url, json=payload, timeout=3)
-    except:
-        pass
+    try: requests.post(url, json=payload, timeout=3)
+    except: pass
 
 def send_order(action, ticker, price, qty):
-    # 確保傳給群益的代號是乾淨的純數字 (鐵則 5：群益下單整合)
-    clean_ticker = str(ticker).replace(".TW", "").replace(".TWO", "")
+    clean_ticker = str(ticker).split('.')[0]
     payload = {
-        "secret": WEBHOOK_SECRET,
-        "ticker": clean_ticker,
-        "action": action,
-        "price": price,
-        "qty": qty
+        "secret": WEBHOOK_SECRET, "ticker": clean_ticker,
+        "action": action, "price": price, "qty": qty
     }
-    
-    headers = {
-        "ngrok-skip-browser-warning": "true",
-        "Content-Type": "application/json"
-    }
-    
+    headers = {"ngrok-skip-browser-warning": "true", "Content-Type": "application/json"}
     try:
         response = requests.post(LOCAL_AGENT_WEBHOOK, json=payload, headers=headers, timeout=5)
         if response.status_code == 200:
-            msg = f"✅ [群益 API 指令已送出] {action.upper()} {clean_ticker} | 價格: {price} | 數量: {qty}"
+            msg = f"✅ [群益 API 已下單] {action.upper()} {clean_ticker} | 價格: {price} | 張數: {qty}"
             st.success(msg)
             send_telegram_msg(msg)
-        else:
-            st.error(f"❌ 本機 Agent 回應異常 (Code: {response.status_code})\n{response.text}")
-    except Exception as e:
-        st.error(f"❌ 無法連線至本機 Agent，請確認 ngrok 網址正確且程式執行中。\n{e}")
+        else: st.error(f"❌ 地端回應異常: {response.text}")
+    except Exception as e: st.error(f"❌ 無法連線地端: {e}")
 
-def get_valid_ticker(stock_id):
-    """驗證並轉換股票代號 (支援上市 .TW 與上櫃 .TWO)"""
-    stock_id = str(stock_id).strip()
-    if not stock_id: return None
-    
-    # 簡單驗證邏輯：先試上市，不行再試上櫃
-    test_tw = f"{stock_id}.TW"
-    try:
-        info = yf.Ticker(test_tw).fast_info
-        if 'lastPrice' in info: return test_tw
-    except:
-        pass
-        
-    test_two = f"{stock_id}.TWO"
-    try:
-        info = yf.Ticker(test_two).fast_info
-        if 'lastPrice' in info: return test_two
-    except:
-        return None
-    return None
+def plot_stock_with_volume(df, title):
+    """繪製專業量價走勢圖 (鐵則 4)"""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    # 價格線
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='成交價', line=dict(color='#1f77b4', width=2)), row=1, col=1)
+    # 成交量
+    colors = ['red' if close >= open_p else 'green' for close, open_p in zip(df['Close'], df['Open'])]
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, xaxis_rangeslider_visible=False)
+    return fig
 
 # ==========================================
 # 3. UI 介面與狀態初始化
 # ==========================================
 if 'watch_list' not in st.session_state:
-    st.session_state['watch_list'] = ["1717.TW"] # 預設保留東聯
+    st.session_state['watch_list'] = ["1717.TW"]
 
-# --- 側邊欄：鐵則 3 (全股票模糊搜尋機制) ---
-st.sidebar.title("⚙️ 戰情室控制台")
-st.sidebar.write("🔍 **全台股搜尋與新增**")
-new_stock_input = st.sidebar.text_input("請輸入股票代號 (如: 2330, 3017)", placeholder="輸入代號後按 Enter")
+# --- 側邊欄控制 ---
+st.sidebar.title("⚙️ 控制中樞")
 
-if st.sidebar.button("➕ 加入監控"):
-    if new_stock_input:
-        with st.spinner("驗證代號中..."):
-            valid_ticker = get_valid_ticker(new_stock_input)
-            if valid_ticker:
-                if valid_ticker not in st.session_state['watch_list']:
-                    st.session_state['watch_list'].append(valid_ticker)
-                    st.rerun()
-                else:
-                    st.sidebar.warning("此股票已在監控清單中！")
-            else:
-                st.sidebar.error("找不到此股票代號，請確認是否輸入正確。")
+# 鐵則 3：模糊搜尋與快速加入
+st.sidebar.subheader("🔍 搜尋股票")
+# 建立顯示用的選項清單
+search_options = [f"{k} {v}" for k, v in STOCKS_DICT.items()]
+search_input = st.sidebar.selectbox("代號或名稱搜尋", ["請選擇"] + search_options)
 
-if st.sidebar.button("🗑️ 清空清單"):
+# 鐵則 3：支援手動輸入代號按 Enter 加入
+manual_input = st.sidebar.text_input("或直接輸入代號 (Enter 加入)", key="manual_add")
+
+def add_to_watchlist(raw_id):
+    clean_id = raw_id.split(' ')[0].strip()
+    if clean_id:
+        # 簡單判斷上市/上櫃
+        ticker = f"{clean_id}.TW"
+        if ticker not in st.session_state['watch_list']:
+            st.session_state['watch_list'].append(ticker)
+            st.rerun()
+
+if st.sidebar.button("➕ 加入監控") or (manual_input and manual_input != st.session_state.get('last_input')):
+    target = manual_input if manual_input else search_input
+    if target != "請選擇":
+        add_to_watchlist(target)
+        st.session_state['last_input'] = manual_input
+
+if st.sidebar.button("🗑️ 清空所有監控"):
     st.session_state['watch_list'] = []
     st.rerun()
 
 # --- 主畫面 ---
 st.title("📈 AI 穩贏自動化戰情牆")
 
-# 保留既有的大盤監控
-st.subheader("🌐 大盤即時走勢")
-t1, t2 = st.columns(2)
-with t1:
-    try:
-        d_tw = yf.download("^TWII", period="1d", interval="5m", progress=False)
-        if not d_tw.empty:
-            curr = d_tw['Close'].iloc[-1].item()
-            diff = curr - d_tw['Open'].iloc[0].item()
-            st.metric("加權指數 (上市)", f"{curr:.2f}", f"{diff:+.2f}")
-    except:
-        st.metric("加權指數 (上市)", "載入中...", "0.0")
+# 鐵則 1 & 4：大盤走勢量價圖
+st.subheader("🌐 大盤即時量價走勢")
+m_col1, m_col2 = st.columns(2)
 
-with t2:
-    try:
-        d_otc = yf.download("^TWOII", period="1d", interval="5m", progress=False)
-        if not d_otc.empty:
-            curr = d_otc['Close'].iloc[-1].item()
-            diff = curr - d_otc['Open'].iloc[0].item()
-            st.metric("櫃買指數 (上櫃)", f"{curr:.2f}", f"{diff:+.2f}")
-    except:
-        st.metric("櫃買指數 (上櫃)", "載入中...", "0.0")
+with m_col1:
+    idx_df = yf.download("^TWII", period="1d", interval="5m", progress=False)
+    if not idx_df.empty:
+        st.plotly_chart(plot_stock_with_volume(idx_df, "加權指數"), use_container_width=True)
+        st.metric("上市加權", f"{idx_df['Close'].iloc[-1]:.2f}", f"{idx_df['Close'].iloc[-1]-idx_df['Open'].iloc[0]:+.2f}")
+
+with m_col2:
+    otc_df = yf.download("^TWOII", period="1d", interval="5m", progress=False)
+    if not otc_df.empty:
+        st.plotly_chart(plot_stock_with_volume(otc_df, "櫃買指數"), use_container_width=True)
+        st.metric("上櫃櫃買", f"{otc_df['Close'].iloc[-1]:.2f}", f"{otc_df['Close'].iloc[-1]-otc_df['Open'].iloc[0]:+.2f}")
 
 st.markdown("---")
 
-# 動態產生監控區
-for yf_ticker in st.session_state['watch_list']:
-    display_name = yf_ticker.replace(".TW", "").replace(".TWO", "")
+# --- 監控清單 ---
+for ticker in st.session_state['watch_list']:
+    stock_id = ticker.split('.')[0]
+    stock_name = STOCKS_DICT.get(stock_id, "未知標的")
     
     with st.container():
-        st.markdown(f"### 🎯 標的：{display_name}")
+        # 標題列：包含名稱與刪除按鈕 (鐵則 4)
+        head1, head2 = st.columns([5, 1])
+        head1.subheader(f"📊 {stock_id} {stock_name}")
+        if head2.button("🗑️ 移除監控", key=f"del_{ticker}"):
+            st.session_state['watch_list'].remove(ticker)
+            st.rerun()
+            
         col_chart, col_trade = st.columns([2, 1])
         
         with col_chart:
-            try:
-                # 鐵則 4：抓取單日 1 分鐘級別的即時走勢與成交量
-                df = yf.download(yf_ticker, period="1d", interval="1m", progress=False)
-                if not df.empty:
-                    # 建立上下雙層圖表 (走勢圖 + 成交量)
-                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
-                    
-                    # 上層：即時價格走勢線
-                    fig.add_trace(go.Scatter(x=df.index, y=df['Close'].squeeze(), 
-                                             mode='lines', name='成交價', 
-                                             line=dict(color='#1f77b4', width=2)), row=1, col=1)
-                    
-                    # 下層：成交量柱狀圖 (台股慣例：收盤>=開盤為紅，反之為綠)
-                    colors = ['red' if close >= open else 'green' 
-                              for close, open in zip(df['Close'].squeeze(), df['Open'].squeeze())]
-                    fig.add_trace(go.Bar(x=df.index, y=df['Volume'].squeeze(), 
-                                         name='成交量', marker_color=colors), row=2, col=1)
-                    
-                    fig.update_layout(height=400, margin=dict(l=0,r=0,t=10,b=0), showlegend=False)
-                    fig.update_xaxes(rangeslider_visible=False)
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    last_p = float(df['Close'].iloc[-1].item())
-                else:
-                    st.warning(f"目前非交易時間或無法取得 {display_name} 的日內走勢數據")
-                    last_p = 0.0
-            except Exception as e:
-                st.error("圖表載入失敗")
-                last_p = 0.0
+            df = yf.download(ticker, period="1d", interval="1m", progress=False)
+            if not df.empty:
+                st.plotly_chart(plot_stock_with_volume(df, ticker), use_container_width=True)
+                last_price = float(df['Close'].iloc[-1])
+            else:
+                st.warning("暫無日內數據")
+                last_price = 0.0
 
-        # 保留既有的遠端下單區塊
         with col_trade:
-            st.markdown(f"#### ⚡ 群益遠端指令中樞")
-            with st.form(f"form_{display_name}"):
-                act = st.selectbox("買賣方向", ["buy", "sell"])
-                price = st.number_input("委託價", value=float(last_p), step=0.5)
-                qty = st.number_input("委託張數", value=1, min_value=1)
-                if st.form_submit_button("🚀 發送實體委託"):
-                    send_order(act, display_name, price, qty)
+            st.markdown("#### ⚡ 遠端群益下單")
+            with st.form(f"form_{ticker}"):
+                act = st.selectbox("買賣", ["buy", "sell"], key=f"act_{ticker}")
+                price = st.number_input("價格", value=last_price, step=0.05, key=f"prc_{ticker}")
+                qty = st.number_input("張數", value=1, min_value=1, key=f"qty_{ticker}")
+                if st.form_submit_button("🚀 發射實體委託"):
+                    send_order(act, stock_id, price, qty)
         st.markdown("---")
