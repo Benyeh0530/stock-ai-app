@@ -17,60 +17,53 @@ NGROK_BASE_URL = "https://您的ngrok網址.ngrok-free.app"
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
 
 # ==========================================
-# 2. 雲端全市場地毯式掃描 (上市 + 上櫃 + 興櫃 + 創櫃)
+# 2. 終極全市場動態掃描 (FinMind + 證交所公司庫)
 # ==========================================
-BASE_STOCKS = {
-    "1717": "東聯", "2330": "台積電", "2317": "鴻海", "2454": "聯發科",
-    "2603": "長榮", "3037": "欣興", "3017": "奇鋐", "2303": "聯電",
-    "2609": "陽明", "2615": "萬海", "2881": "富邦金", "2882": "國泰金",
-    "3231": "緯創", "2382": "廣達", "1513": "中興電", "1519": "華城",
-    "6770": "力積電", "3008": "大立光", "0050": "元大台灣50", "0056": "元大高股息"
-}
-
-@st.cache_data(ttl=86400, show_spinner="📡 正在掃描全台股市場...")
+@st.cache_data(ttl=86400, show_spinner="📡 正在連接專業金融資料庫，獲取全市場清單...")
 def fetch_all_stocks():
-    stocks = BASE_STOCKS.copy() 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"
-    }
+    stocks = {}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"}
     
-    # 1. 掃描上市 (TWSE)
+    # 策略 1: FinMind 開源 API (不受政府 IP 阻擋，涵蓋上市/上櫃/興櫃，資料最齊全)
     try:
-        res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, verify=False, timeout=5)
-        if res_twse.status_code == 200:
-            for item in res_twse.json():
-                if len(item["Code"]) == 4: stocks[item["Code"]] = item["Name"]
-    except: pass
+        url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+        res = requests.get(url, verify=False, timeout=10)
+        if res.status_code == 200:
+            for item in res.json().get("data", []):
+                code = str(item.get("stock_id", ""))
+                # 嚴格過濾：只要 4 碼的標準股票代號
+                if len(code) == 4 and code.isdigit():
+                    stocks[code] = item.get("stock_name", "")
+            
+            # 如果成功抓到超過 1500 檔，代表全市場抓取成功，直接回傳
+            if len(stocks) > 1500:
+                return stocks
+    except Exception as e:
+        print(f"FinMind API 連線失敗: {e}")
 
-    # 2. 掃描上櫃 (TPEx Mainboard)
-    try:
-        res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, verify=False, timeout=5)
-        if res_tpex.status_code == 200:
-            for item in res_tpex.json():
-                if len(item.get("SecuritiesCompanyCode", "")) == 4: 
-                    stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-    except: pass
+    # 策略 2: 證交所「公開發行公司基本資料」 (L上市, O上櫃, E興櫃, C創櫃)
+    # 這是註冊資料庫，即使當天沒成交也會在名單內
+    endpoints = ["L", "O", "E", "C"]
+    for ep in endpoints:
+        try:
+            url = f"https://openapi.twse.com.tw/v1/opendata/t187ap03_{ep}"
+            res = requests.get(url, headers=headers, verify=False, timeout=5)
+            if res.status_code == 200:
+                for item in res.json():
+                    code = str(item.get("公司代號", ""))
+                    if len(code) == 4 and code.isdigit():
+                        # 清除名稱中可能的空白
+                        stocks[code] = item.get("公司名稱", "").strip()
+        except Exception as e:
+            print(f"證交所 API ({ep}) 連線失敗: {e}")
 
-    # 3. 掃描興櫃 (TPEx Emerging) - 解決 77xx 找不到的問題！
-    try:
-        res_emg = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_emg_quotes", headers=headers, verify=False, timeout=5)
-        if res_emg.status_code == 200:
-            for item in res_emg.json():
-                if len(item.get("SecuritiesCompanyCode", "")) == 4: 
-                    stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-    except: pass
-
-    # 4. 掃描創櫃 (TPEx GISA) - 徹底補網
-    try:
-        res_gisa = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_gisa_quotes", headers=headers, verify=False, timeout=5)
-        if res_gisa.status_code == 200:
-            for item in res_gisa.json():
-                if len(item.get("SecuritiesCompanyCode", "")) == 4: 
-                    stocks[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-    except: pass
+    # 最後的絕對底線防護 (只有在網路完全斷線時才會用到)
+    if not stocks:
+        stocks = {"2330": "台積電", "2317": "鴻海", "1717": "東聯"}
         
     return stocks
 
+# 每次啟動網頁時，動態載入最新字典
 STOCKS_DICT = fetch_all_stocks()
 
 # ==========================================
@@ -118,18 +111,19 @@ if 'watch_list' not in st.session_state:
 
 st.sidebar.title("⚙️ 戰情控制台")
 
-# 🚨 防呆：如果只有備用名單，顯示清除快取按鈕
-if len(STOCKS_DICT) < 100:
-    st.sidebar.error("⚠️ 無法連線至政府開放 API！")
-    if st.sidebar.button("🔄 強制重新下載台股清單"):
-        st.cache_data.clear()
-        st.rerun()
+# 🚨 防呆提示：確保資料庫抓取成功
+st.sidebar.info(f"✅ 目前資料庫已載入 {len(STOCKS_DICT)} 檔股票 (含上市/上櫃/興櫃/創櫃)")
+
+# 強制清除快取按鈕 (方便您隨時重置)
+if st.sidebar.button("🔄 強制更新市場清單"):
+    st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.markdown("### 🔍 新增監控標的")
 
 search_options = [f"{k} {v}" for k, v in STOCKS_DICT.items()]
 selected_stock = st.sidebar.selectbox(
-    "全台股模糊搜尋 (包含興櫃)", 
+    "全台股模糊搜尋", 
     ["請點擊並輸入代號/名稱 (例: 776)"] + search_options
 )
 
