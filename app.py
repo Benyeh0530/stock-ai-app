@@ -8,7 +8,7 @@ from datetime import datetime
 # 1. 核心設定 (請確保網址正確且無特殊字元)
 # ==========================================
 # ⚠️ 注意：請檢查此網址，確保手打或純文字貼上，避免出現 xn-- 開頭的亂碼
-LOCAL_AGENT_WEBHOOK = "https://您的ngrok網址/tv_webhook" 
+LOCAL_AGENT_WEBHOOK = "https://stock-ai-app-ajmfbtg2rjyzaqkabfdmb7.streamlit.app/" 
 WEBHOOK_SECRET = "MySOC_Secret_Key_2026"
 
 TG_BOT_TOKEN = "您的_Telegram_Bot_Token"
