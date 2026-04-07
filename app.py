@@ -85,4 +85,33 @@ if stock_id:
                 )
                 st.plotly_chart(fig_line, use_container_width=True)
             else:
-                st.warning(
+                st.warning(f"⚠️ 尚無 {stock_id} 今日即時走勢資料 (可能尚未開盤)")
+        except Exception as e:
+            st.error(f"讀取走勢圖失敗: {e}")
+
+    # ==========================================
+    # 📊 右半邊：歷史 K 線圖 (日K)
+    # ==========================================
+    with col2:
+        st.markdown("##### 📊 歷史 K 線圖 (近三個月)")
+        try:
+            # 繪製右側蠟燭圖
+            if not df_daily.empty:
+                fig_candle = go.Figure(data=[go.Candlestick(
+                    x=df_daily.index,
+                    open=df_daily['Open'],
+                    high=df_daily['High'],
+                    low=df_daily['Low'],
+                    close=df_daily['Close'],
+                    increasing_line_color='#ef5350', # 紅漲 (符合台股習慣)
+                    decreasing_line_color='#26a69a'  # 綠跌 (符合台股習慣)
+                )])
+                fig_candle.update_layout(
+                    height=450, margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis_rangeslider_visible=False, template="plotly_white"
+                )
+                st.plotly_chart(fig_candle, use_container_width=True)
+            else:
+                st.warning(f"⚠️ 尚無 {stock_id} 歷史 K 線資料")
+        except Exception as e:
+            st.error(f"讀取K線圖失敗: {e}")
