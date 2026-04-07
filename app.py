@@ -241,7 +241,7 @@ def get_index_data_engine(symbol, cache_buster):
                     df_spark.drop(columns=['Date'], inplace=True)
         except: pass
 
-    # 🔥 深度圖表回推備援機制
+    # 🔥 深度圖表回推備援機制 (防堵 Yahoo API 報價端點當機，解決櫃買指數消失問題)
     if q_curr is None or q_prev is None:
         try:
             q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
@@ -793,11 +793,37 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-all_tw_to_fetch = tuple(set([s['code'] for s in st.session_state.tw_stocks]))
+# ==========================================
+# 🔥 效能優化：將所有目標(包含族群聯動、AI報告)統整到 Bulk Fetch，極速載入不再卡頓
+# ==========================================
+all_tw_to_fetch = list(set([s['code'] for s in st.session_state.tw_stocks]))
 us_set = set([s['code'] for s in st.session_state.us_stocks])
-all_us_to_fetch = tuple(us_set)
+all_us_to_fetch = list(us_set)
 
+# 1. 將所有追蹤股的族群聯動代碼加入打包清單
+for s in st.session_state.tw_stocks:
+    c_codes = get_correlated_stocks(s['code'], s['name'], API_KEY, is_us=False)
+    if c_codes: all_tw_to_fetch.extend(c_codes)
+for s in st.session_state.us_stocks:
+    c_codes = get_correlated_stocks(s['code'], s['name'], API_KEY, is_us=True)
+    if c_codes: all_us_to_fetch.extend(c_codes)
+
+# 2. 將所有 AI 報告中的代碼加入打包清單
+for report in [st.session_state.ai_report_daytrade, st.session_state.ai_report_overnight, st.session_state.ai_report_swing]:
+    if report:
+        for cat, stocks in report.items():
+            for s in stocks: all_tw_to_fetch.append(s['code'])
+if st.session_state.ai_report_us:
+    for cat, stocks in st.session_state.ai_report_us.items():
+        for s in stocks: all_us_to_fetch.append(s['code'])
+
+# 確保去重，節省效能
+all_tw_to_fetch = tuple(set(all_tw_to_fetch))
+all_us_to_fetch = tuple(set(all_us_to_fetch))
+
+# ⚡ 一次性向 Yahoo 請求全域所有即時報價！
 live_price_dict = get_bulk_live_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
+# ==========================================
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
@@ -1047,14 +1073,15 @@ with tab_tw:
             if not corr_codes:
                 if API_KEY:
                     col_m, col_b = st.columns([5, 1])
-                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
+                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動：</b> AI 正在重新鎖定中，請重試。</div>", unsafe_allow_html=True)
                     if col_b.button("🔄 重試", key=f"retry_corr_tw_{code}"):
                         get_correlated_stocks.clear(code, name, API_KEY, is_us=False); st.rerun()
             else:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     c_name = all_stocks.get(c, c); icon = "👑" if i == 0 else "🔗"
-                    cp, pp = get_single_live_price(c, is_us=False, cache_buster=fast_cache_key)
+                    # 🔥 改用 Bulk Fetch 極速載入聯動股價，不再轉圈圈
+                    cp, pp = live_price_dict.get(c, (None, None))
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
@@ -1305,7 +1332,8 @@ with tab_us:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     icon = "👑" if i == 0 else "🔗"
-                    cp, pp = get_single_live_price(c, is_us=True, cache_buster=fast_cache_key)
+                    # 🔥 改用 Bulk Fetch 極速載入聯動股價
+                    cp, pp = live_price_dict.get(c, (None, None))
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
@@ -1378,7 +1406,7 @@ with tab_us:
                             new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
                             if new_t_price != al['price']: 
                                 st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
-                        else: st.markdown(f"<div style='padding-top:5px; color:#cbd5e1;'>追蹤現值: **${mas.get(current_type, 0.0):.2f}**</div>", unsafe_allow_html=True)
+                        else: st.markdown(f"<div style='padding-top:5px; color:#cbd5e1;'>自動追蹤現值: **${mas.get(current_type, 0.0):.2f}**</div>", unsafe_allow_html=True)
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"): st.session_state.us_stocks[idx]['alerts'].pop(a_idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
 
@@ -1409,7 +1437,11 @@ with tab_ai:
                 for i, (cat, stocks) in enumerate(report.items()):
                     with sub_tabs[i]:
                         for s in stocks:
-                            c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
+                            # 🔥 改用 bulk fetch 結果極速載入
+                            c_p = live_price_dict.get(s['code'], (None, None))[0]
+                            if c_p is None: 
+                                c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
+                            
                             target = 0; cond = ">="
                             if c_p:
                                 if "空" in cat: target = round(c_p * 0.985, 2); cond = "<="
