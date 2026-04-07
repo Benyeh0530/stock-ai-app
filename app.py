@@ -76,8 +76,6 @@ def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try: 
         res = http_session.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
-        if res.status_code != 200:
-            st.error(f"⚠️ Telegram API 拒絕發送！代碼：{res.status_code}")
     except Exception as e: pass
 
 def fire_order_to_agent(code, price, action, qty=1):
@@ -187,7 +185,7 @@ if 'initialized' not in st.session_state:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = http_session.get(url, timeout=10, headers=headers).json()
@@ -241,7 +239,6 @@ def get_index_data_engine(symbol, cache_buster):
                     df_spark.drop(columns=['Date'], inplace=True)
         except: pass
 
-    # 🔥 深度圖表回推備援機制 (防堵 Yahoo API 報價端點當機，解決櫃買指數消失問題)
     if q_curr is None or q_prev is None:
         try:
             q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
@@ -552,6 +549,7 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
+# 🔥 效能與 K 棒繪圖終極優化
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -563,11 +561,9 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
     df_chart.index = df_chart.index.tz_convert(tz_str)
 
-    if tf != "日K":
-        freq_map = {"1K": "1min", "5K": "5min", "15K": "15min"}
-        freq = freq_map.get(tf, "1min")
-        df_chart = df_chart.resample(freq).ffill()
-        
+    # 針對 1K 圖表：強制墊滿當日時間軸
+    if tf == "1K":
+        df_chart = df_chart.resample('1min').ffill()
         if curr_p is not None and not df_chart.empty:
             last_valid_idx = df_chart['Close'].last_valid_index()
             if last_valid_idx:
@@ -588,13 +584,15 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
             start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
             end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
             
-        full_index = pd.date_range(start=start_time, end=end_time, freq=freq)
+        full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
         df_chart = df_chart.reindex(full_index)
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
         start_idx = 0
         end_idx = len(df_chart) - 1
+        
+    # 針對 5K, 15K, 日K：採用連續 K 棒渲染 (解決 K 棒消失問題)
     else:
         if curr_p is not None and not df_chart.empty:
             last_idx = df_chart.index[-1]
@@ -609,7 +607,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
-        start_idx = max(0, len(df_chart) - 60)
+        start_idx = max(0, len(df_chart) - 80) # 顯示最近 80 根連續 K 棒
         end_idx = len(df_chart) - 1
 
     if df_chart.empty: return
@@ -793,14 +791,10 @@ t5_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.min
 t15_key = f"{now_tpe.year}{now_tpe.month}{now_tpe.day}{now_tpe.hour}_{now_tpe.minute // 15}"
 is_tw_market_open = datetime.time(9, 0) <= now_tpe.time() <= datetime.time(13, 30)
 
-# ==========================================
-# 🔥 效能優化：將所有目標(包含族群聯動、AI報告)統整到 Bulk Fetch，極速載入不再卡頓
-# ==========================================
 all_tw_to_fetch = list(set([s['code'] for s in st.session_state.tw_stocks]))
 us_set = set([s['code'] for s in st.session_state.us_stocks])
 all_us_to_fetch = list(us_set)
 
-# 1. 將所有追蹤股的族群聯動代碼加入打包清單
 for s in st.session_state.tw_stocks:
     c_codes = get_correlated_stocks(s['code'], s['name'], API_KEY, is_us=False)
     if c_codes: all_tw_to_fetch.extend(c_codes)
@@ -808,7 +802,6 @@ for s in st.session_state.us_stocks:
     c_codes = get_correlated_stocks(s['code'], s['name'], API_KEY, is_us=True)
     if c_codes: all_us_to_fetch.extend(c_codes)
 
-# 2. 將所有 AI 報告中的代碼加入打包清單
 for report in [st.session_state.ai_report_daytrade, st.session_state.ai_report_overnight, st.session_state.ai_report_swing]:
     if report:
         for cat, stocks in report.items():
@@ -817,13 +810,9 @@ if st.session_state.ai_report_us:
     for cat, stocks in st.session_state.ai_report_us.items():
         for s in stocks: all_us_to_fetch.append(s['code'])
 
-# 確保去重，節省效能
 all_tw_to_fetch = tuple(set(all_tw_to_fetch))
 all_us_to_fetch = tuple(set(all_us_to_fetch))
-
-# ⚡ 一次性向 Yahoo 請求全域所有即時報價！
 live_price_dict = get_bulk_live_prices(all_tw_to_fetch, all_us_to_fetch, fast_cache_key)
-# ==========================================
 
 col_t1, col_t2, col_t3, col_t4 = st.columns([1.5, 1.5, 1, 1])
 df_twii, curr_twii, prev_twii = get_index_data_engine('^TWII', fast_cache_key)
@@ -1073,15 +1062,18 @@ with tab_tw:
             if not corr_codes:
                 if API_KEY:
                     col_m, col_b = st.columns([5, 1])
-                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動：</b> AI 正在重新鎖定中，請重試。</div>", unsafe_allow_html=True)
+                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
                     if col_b.button("🔄 重試", key=f"retry_corr_tw_{code}"):
                         get_correlated_stocks.clear(code, name, API_KEY, is_us=False); st.rerun()
             else:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     c_name = all_stocks.get(c, c); icon = "👑" if i == 0 else "🔗"
-                    # 🔥 改用 Bulk Fetch 極速載入聯動股價，不再轉圈圈
                     cp, pp = live_price_dict.get(c, (None, None))
+                    # 🔥 雙層保險：若打包沒抓到，立刻單獨向 Yahoo 索取，保證絕不卡讀取！
+                    if cp is None:
+                        cp, pp = get_single_live_price(c, is_us=False, cache_buster=fast_cache_key)
+                        
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
@@ -1332,8 +1324,11 @@ with tab_us:
                 corr_display = []
                 for i, c in enumerate(corr_codes):
                     icon = "👑" if i == 0 else "🔗"
-                    # 🔥 改用 Bulk Fetch 極速載入聯動股價
                     cp, pp = live_price_dict.get(c, (None, None))
+                    # 🔥 雙層保險：保證聯動股價不卡死
+                    if cp is None:
+                        cp, pp = get_single_live_price(c, is_us=True, cache_buster=fast_cache_key)
+                        
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
@@ -1437,7 +1432,6 @@ with tab_ai:
                 for i, (cat, stocks) in enumerate(report.items()):
                     with sub_tabs[i]:
                         for s in stocks:
-                            # 🔥 改用 bulk fetch 結果極速載入
                             c_p = live_price_dict.get(s['code'], (None, None))[0]
                             if c_p is None: 
                                 c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
