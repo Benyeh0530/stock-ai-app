@@ -1,5 +1,11 @@
 streamlit
-pyotp
+pandas
+google-generativeai
 requests
-yfinance
+urllib3
+pytz
+numpy
+altair
+pyotp
 plotly
+yfinance
