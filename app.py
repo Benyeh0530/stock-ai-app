@@ -2,92 +2,87 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 
-# 設定網頁版面為寬屏模式，讓左右兩張圖看起來更舒適
-st.set_page_config(page_title="戰情牆", layout="wide")
+# ==========================================
+# 0. 網頁基本設定 (寬屏模式)
+# ==========================================
+st.set_page_config(page_title="雲端戰情牆", layout="wide")
 
 # ==========================================
-# 🔍 搜尋區塊：動態輸入股票代號
+# 1. ⬅️ 左邊菜單 (Sidebar) 與 模糊搜尋功能
 # ==========================================
-st.markdown("### 🎯 雲端戰情監控中心")
-# 加入一個文字輸入框，預設值為 1717
-stock_id = st.text_input("請輸入股票代號 (例如: 1717, 2330, 0050)", value="1717")
+st.sidebar.markdown("## ⚙️ 戰情控制台")
 
+# 建立股票清單，st.selectbox 天生內建「模糊搜尋」與「下拉自動完成」功能
+# (這裡放入了您常看的標的，您可以隨時自由新增)
+STOCK_LIST = [
+    "1717 (長興)", "3017 (奇鋐)", "3037 (欣興)", "6770 (力積電)", 
+    "0050 (元大台灣50)", "00891 (中信關鍵半導體)", "2330 (台積電)", 
+    "VOO", "QQQ", "VT"
+]
+
+search_mode = st.sidebar.radio("搜尋模式", ["快速選單 (模糊搜尋)", "手動輸入代號"])
+
+if search_mode == "快速選單 (模糊搜尋)":
+    # 使用 selectbox 達成模糊搜尋效果
+    selected_option = st.sidebar.selectbox("🔍 搜尋並選擇股票", STOCK_LIST, index=0)
+    # 從選項中提取純代號 (例如 "1717 (長興)" -> "1717")
+    stock_id = selected_option.split(" ")[0]
+else:
+    # 保留手動輸入彈性
+    stock_id = st.sidebar.text_input("✍️ 手動輸入代號", value="1717")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("💡 *圖表資料來源: Yahoo Finance*")
+st.sidebar.markdown("💡 *實體下單通道: 群益地端代理*")
+
+# ==========================================
+# 2. 主畫面：左右雙圖表配置
+# ==========================================
+st.markdown(f"### 📈 {stock_id} 即時戰情分析")
 st.markdown("---")
-st.markdown(f"#### 📈 {stock_id} 即時戰情分析")
 
-# 如果使用者有輸入內容才執行抓取
 if stock_id:
-    # 建立左右兩個區塊
+    # 建立左右兩個均分的區塊
     col1, col2 = st.columns(2)
 
     # ==========================================
-    # ⬅️ 左半邊：當日即時走勢圖 (1分K)
+    # 📈 左半邊：當日即時走勢圖 (1分K)
     # ==========================================
     with col1:
         st.markdown("##### ⚡ 當日即時走勢")
-        
-        # 透過 Streamlit 雲端直接向 Yahoo 請求今日 1 分鐘級別資料
-        ticker_tw = yf.Ticker(f"{stock_id}.TW")
-        df_intraday = ticker_tw.history(period="1d", interval="1m")
-        
-        # 若上市沒資料，嘗試抓上櫃
-        if df_intraday.empty:
-            ticker_two = yf.Ticker(f"{stock_id}.TWO")
-            df_intraday = ticker_two.history(period="1d", interval="1m")
+        try:
+            # 判斷是否為美股 (純英文字母) 或台股 (數字)
+            if stock_id.isalpha():
+                ticker = yf.Ticker(stock_id)
+                df_intraday = ticker.history(period="1d", interval="1m")
+                df_daily = ticker.history(period="3mo", interval="1d")
+            else:
+                ticker = yf.Ticker(f"{stock_id}.TW")
+                df_intraday = ticker.history(period="1d", interval="1m")
+                df_daily = ticker.history(period="3mo", interval="1d")
+                
+                # 若上市沒資料，嘗試抓上櫃
+                if df_intraday.empty or df_daily.empty:
+                    ticker = yf.Ticker(f"{stock_id}.TWO")
+                    df_intraday = ticker.history(period="1d", interval="1m")
+                    df_daily = ticker.history(period="3mo", interval="1d")
 
-        if not df_intraday.empty:
-            # 繪製走勢線圖 (Line Chart)
-            fig_line = go.Figure()
-            fig_line.add_trace(go.Scatter(
-                x=df_intraday.index, 
-                y=df_intraday['Close'], 
-                mode='lines', 
-                name='成交價',
-                line=dict(color='#1f77b4', width=2)
-            ))
-            
-            # 美化版面
-            fig_line.update_layout(
-                height=400,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="時間",
-                yaxis_title="價格",
-                template="plotly_white"
-            )
-            st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.warning(f"⚠️ 尚無 {stock_id} 今日即時走勢資料 (可能尚未開盤或代號錯誤)")
-
-    # ==========================================
-    # ➡️ 右半邊：歷史 K 線圖 (日K)
-    # ==========================================
-    with col2:
-        st.markdown("##### 📊 歷史 K 線圖 (近三個月)")
-        
-        # 透過 Streamlit 雲端直接向 Yahoo 請求近 3 個月日線資料
-        df_daily = ticker_tw.history(period="3mo", interval="1d")
-        if df_daily.empty:
-            df_daily = ticker_two.history(period="3mo", interval="1d")
-
-        if not df_daily.empty:
-            # 繪製蠟燭圖 (Candlestick Chart)
-            fig_candle = go.Figure(data=[go.Candlestick(
-                x=df_daily.index,
-                open=df_daily['Open'],
-                high=df_daily['High'],
-                low=df_daily['Low'],
-                close=df_daily['Close'],
-                increasing_line_color='red',    # 台股紅漲
-                decreasing_line_color='green'   # 台股綠跌
-            )])
-            
-            # 美化版面並隱藏底部的範圍選擇器 (節省空間)
-            fig_candle.update_layout(
-                height=400,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_rangeslider_visible=False,
-                template="plotly_white"
-            )
-            st.plotly_chart(fig_candle, use_container_width=True)
-        else:
-            st.warning(f"⚠️ 尚無 {stock_id} 歷史 K 線資料")
+            # 繪製左側走勢圖
+            if not df_intraday.empty:
+                fig_line = go.Figure()
+                fig_line.add_trace(go.Scatter(
+                    x=df_intraday.index, 
+                    y=df_intraday['Close'], 
+                    mode='lines', 
+                    name='成交價',
+                    line=dict(color='#1f77b4', width=2),
+                    fill='tozeroy', # 增加底部陰影提升質感
+                    fillcolor='rgba(31, 119, 180, 0.1)'
+                ))
+                fig_line.update_layout(
+                    height=450, margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis_title="時間", yaxis_title="價格", template="plotly_white"
+                )
+                st.plotly_chart(fig_line, use_container_width=True)
+            else:
+                st.warning(
