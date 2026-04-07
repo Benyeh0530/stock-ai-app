@@ -187,7 +187,7 @@ if 'initialized' not in st.session_state:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = http_session.get(url, timeout=10, headers=headers).json()
@@ -241,7 +241,7 @@ def get_index_data_engine(symbol, cache_buster):
                     df_spark.drop(columns=['Date'], inplace=True)
         except: pass
 
-    # 🔥 深度圖表回推備援機制 (防堵 Yahoo API 報價端點當機)
+    # 🔥 深度圖表回推備援機制
     if q_curr is None or q_prev is None:
         try:
             q_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&_t={int(time.time())}"
@@ -252,7 +252,6 @@ def get_index_data_engine(symbol, cache_buster):
                 if q_prev is None: q_prev = res_list[0].get('regularMarketPreviousClose')
         except: pass
         
-        # 如果 v7/quote 也抓不到 (櫃買指數常見狀況)，直接從 5d 歷史日 K 挖出最新價格
         if q_curr is None:
             try:
                 fallback_url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
@@ -1047,10 +1046,9 @@ with tab_tw:
             corr_codes = get_correlated_stocks(code, name, API_KEY, is_us=False)
             if not corr_codes:
                 if API_KEY:
-                    # 🔥 手動重試機制，不卡死自動更新迴圈
                     col_m, col_b = st.columns([5, 1])
                     col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
-                    if col_b.button("🔄 重試", key=f"retry_corr_{code}"):
+                    if col_b.button("🔄 重試", key=f"retry_corr_tw_{code}"):
                         get_correlated_stocks.clear(code, name, API_KEY, is_us=False); st.rerun()
             else:
                 corr_display = []
@@ -1102,7 +1100,7 @@ with tab_tw:
                     with c_pos4: new_lots = st.number_input("張數", value=my_l, min_value=1, step=1, key=f"my_l_tw_{code}")
                     with c_pos5: 
                         st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
-                        new_auto = st.checkbox("🚨 觸發警示時，自動送出上述委託", value=stock.get('auto_trade', False), key=f"auto_tw_{code}")
+                        new_auto = st.checkbox("🚨 觸發警示時自動送出委託", value=stock.get('auto_trade', False), key=f"auto_tw_{code}")
                     
                     if new_trade_type != my_tt or new_dir != my_dir or new_price != my_p or new_lots != my_l or new_auto != stock.get('auto_trade'):
                         st.session_state.tw_stocks[idx]['my_trade_type'] = new_trade_type; st.session_state.tw_stocks[idx]['my_dir'] = new_dir; st.session_state.tw_stocks[idx]['my_price'] = new_price; st.session_state.tw_stocks[idx]['my_lots'] = new_lots; st.session_state.tw_stocks[idx]['auto_trade'] = new_auto
@@ -1299,10 +1297,9 @@ with tab_us:
             corr_codes = get_correlated_stocks(code, code, API_KEY, is_us=True)
             if not corr_codes:
                 if API_KEY:
-                    # 🔥 手動重試機制，不卡死自動更新迴圈
                     col_m, col_b = st.columns([5, 1])
                     col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
-                    if col_b.button("🔄 重試", key=f"retry_corr_{code}"):
+                    if col_b.button("🔄 重試", key=f"retry_corr_us_{code}"):
                         get_correlated_stocks.clear(code, code, API_KEY, is_us=True); st.rerun()
             else:
                 corr_display = []
@@ -1329,4 +1326,176 @@ with tab_us:
 
             st.markdown("---")
             if st.session_state.authenticated:
-                c_order1, c_order2, c_order3 = st.columns([2, 1,
+                c_order1, c_order2, c_order3 = st.columns([2, 1, 1])
+                with c_order1: st.markdown(f"⚡ **雲端中控：火力打擊區** (股數設定: {my_l_us})")
+                with c_order2:
+                    if st.button(f"🔴 閃電買進", key=f"fire_b_us_{code}", use_container_width=True, type="primary"):
+                        res = fire_order_to_agent(code, curr_p, "Buy", my_l_us)
+                        if res.get('status') == 'success': st.toast(f"✅ 地端 Agent 收到買進指令: {code}", icon='🔥')
+                        else: st.error(f"❌ {res.get('msg')}")
+                with c_order3:
+                    if st.button(f"🟢 閃電賣出", key=f"fire_s_us_{code}", use_container_width=True):
+                        res = fire_order_to_agent(code, curr_p, "Sell", my_l_us)
+                        if res.get('status') == 'success': st.toast(f"✅ 地端 Agent 收到賣出指令: {code}", icon='❄️')
+                        else: st.error(f"❌ {res.get('msg')}")
+            else:
+                st.info("🔒 閃電交易按鈕已隱藏。請在左側面板輸入 Google Authenticator 密碼以解鎖火力控制權限。")
+
+            with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
+                if st.session_state.authenticated:
+                    st.markdown("##### 💰 美股持倉參數 (含自動下單)")
+                    c_pos1, c_pos2, c_pos3, c_pos4 = st.columns([1.5, 1.5, 1.5, 2])
+                    with c_pos1: new_dir = st.selectbox("方向", ["作多", "作空"], index=0 if my_dir_us == "作多" else 1, key=f"dir_us_{code}")
+                    with c_pos2: new_price = st.number_input("成交均價", value=my_p_us, step=1.0, key=f"my_p_us_{code}")
+                    with c_pos3: new_shares = st.number_input("股數", value=my_l_us, min_value=1, step=1, key=f"my_l_us_{code}")
+                    with c_pos4: 
+                        st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
+                        new_auto = st.checkbox("🚨 觸發警示時自動送出委託", value=stock.get('auto_trade', False), key=f"auto_us_{code}")
+                    
+                    if new_dir != my_dir_us or new_price != my_p_us or new_shares != my_l_us or new_auto != stock.get('auto_trade'):
+                        st.session_state.us_stocks[idx]['my_dir'] = new_dir; st.session_state.us_stocks[idx]['my_price'] = new_price; st.session_state.us_stocks[idx]['my_shares'] = new_shares; st.session_state.us_stocks[idx]['auto_trade'] = new_auto
+                        save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
+                else: st.warning("🔒 請先通過 2FA 雙因子認證才能修改機密部位參數。")
+
+                st.divider()
+                st.markdown("##### 🎯 專屬監控防線")
+                for a_idx, al in enumerate(alerts):
+                    c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
+                    opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
+                    current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
+                    
+                    with c_type:
+                        new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_us_{code}_{a_idx}", label_visibility="collapsed")
+                        if new_type != current_type: 
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['type'] = new_type; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
+                    with c_cond:
+                        new_cond = st.selectbox("方向", [">= 漲破", "<= 跌破"], index=0 if al['cond'] == ">=" else 1, key=f"cond_us_{code}_{a_idx}", label_visibility="collapsed")
+                        new_cond_val = ">=" if ">=" in new_cond else "<="
+                        if new_cond_val != al['cond']: 
+                            st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
+                    with c_inp:
+                        if current_type == "固定價格":
+                            new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
+                            if new_t_price != al['price']: 
+                                st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
+                        else: st.markdown(f"<div style='padding-top:5px; color:#cbd5e1;'>追蹤現值: **${mas.get(current_type, 0.0):.2f}**</div>", unsafe_allow_html=True)
+                    with c_del_al:
+                        if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"): st.session_state.us_stocks[idx]['alerts'].pop(a_idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
+
+                c_btn1, c_btn2, _ = st.columns([2, 2, 3])
+                with c_btn1:
+                    if st.button("➕ 新增警示", key=f"add_al_us_{code}"): st.session_state.us_stocks[idx]['alerts'].append({"type": "固定價格", "price": 0.0, "cond": ">=", "triggered": False, "touch_2_triggered": False}); st.rerun()
+                with c_btn2:
+                    if API_KEY:
+                        if st.button("🤖 AI 算價", key=f"ai_p_us_{code}"):
+                            with st.spinner("AI 運算中..."): cb_ai_calc_price_us(idx, code, curr_p)
+                            st.rerun()
+
+# ====================
+# 戰區 3：🤖 AI 選股報告中心
+# ====================
+with tab_ai:
+    st.markdown("### 🤖 跨海智能 AI 選股報告中心")
+    st.caption("💡 點擊下方對應的頁籤切換不同策略報告。若無資料，請至左側邊欄點擊對應的「生成」按鈕。")
+    
+    ai_tabs = st.tabs(["🚀 台股當沖", "🌙 台股隔日沖", "🦅 台股波段", "🇺🇸 美股專區"])
+    reports_mapping = [(ai_tabs[0], st.session_state.ai_report_daytrade, "台股"), (ai_tabs[1], st.session_state.ai_report_overnight, "台股"), (ai_tabs[2], st.session_state.ai_report_swing, "台股"), (ai_tabs[3], st.session_state.ai_report_us, "美股")]
+    
+    for tab, report, market_type in reports_mapping:
+        with tab:
+            if not report: st.info("尚無報告，請至側邊欄點選生成對應的策略報告。")
+            else:
+                sub_tabs = st.tabs(list(report.keys()))
+                for i, (cat, stocks) in enumerate(report.items()):
+                    with sub_tabs[i]:
+                        for s in stocks:
+                            c_p, _ = get_single_live_price(s['code'], is_us=(market_type == "美股"), cache_buster=fast_cache_key)
+                            target = 0; cond = ">="
+                            if c_p:
+                                if "空" in cat: target = round(c_p * 0.985, 2); cond = "<="
+                                elif "多" in cat: target = round(c_p * 1.015, 2)
+                                else: target = round(c_p * 1.05, 2)
+                            
+                            with st.expander(f"🎯 {s['name']}({s['code']}) | 真實現價: {c_p or '--'} | 建議目標價: {target}"):
+                                st.write(f"**策略理由**：{s.get('strategy', '')}")
+                                btn_txt = f"➕ 帶入目標價 {target} 且監控 {'跌破' if cond=='<=' else '漲破'}"
+                                if market_type == "美股": 
+                                    if st.button(btn_txt, key=f"btn_u_{s['code']}_{target}_{cat}"): cb_add_us(s['code'], s['name'], target, cond); st.rerun()
+                                else: 
+                                    if st.button(btn_txt, key=f"btn_t_{s['code']}_{target}_{cat}"): cb_add_tw(s['code'], s['name'], target, cond); st.rerun()
+
+# ====================
+# 戰區 4：10年核心資產
+# ====================
+with tab_core:
+    st.markdown("### 🐢 穩健增長：20萬 TWD 核心配置計畫")
+    for asset in st.session_state.core_assets:
+        code, is_us = asset['code'], asset['is_us']
+        df_daily, _ = get_historical_features(code, is_us=is_us)
+        if not df_daily.empty:
+            curr_p = df_daily['Close'].iloc[-1]
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([1.5, 1.5, 1])
+                c1.markdown(f"**{'🇺🇸' if is_us else '🇹🇼'} {code}** | 現價: {curr_p:.2f}")
+                c2.metric("季線 (60MA)", f"{df_daily['Close'].tail(60).mean():.2f}")
+                c3.metric("RSI", f"{df_daily['RSI'].iloc[-1]:.1f}")
+
+# ====================
+# 戰區 5：📡 爆量雷達快篩
+# ====================
+with tab_radar:
+    st.markdown("### 📡 盤中動態爆量雷達")
+    st.caption("💡 請在此貼上您想掃描的自選股清單（最多建議 50 檔），系統會自動比對當前是否有異常大單爆量。")
+    default_pool = "2330, 2317, 2454, 3231, 2382, 3443, 2368, 2303, 3034, 2603"
+    scan_pool_input = st.text_area("🎯 掃描目標代碼 (用逗號隔開)", value=default_pool)
+    
+    if st.button("🚀 啟動全域爆量掃描", type="primary"):
+        pool_codes = [c.strip() for c in scan_pool_input.split(",") if c.strip()]
+        if not pool_codes: st.warning("請先輸入要掃描的股票代碼。")
+        else:
+            with st.spinner(f"正在掃描 {len(pool_codes)} 檔股票的即時量能，請稍候..."):
+                found_targets = []
+                prices_dict = get_bulk_live_prices(tuple(pool_codes), tuple(), fast_cache_key)
+                progress_bar = st.progress(0)
+                
+                for i, code in enumerate(pool_codes):
+                    time.sleep(0.2); progress_bar.progress((i + 1) / len(pool_codes))
+                    df_1m = get_realtime_tick(code, ".TW", fast_cache_key)
+                    if df_1m.empty: df_1m = get_realtime_tick(code, ".TWO", fast_cache_key)
+                    
+                    if not df_1m.empty:
+                        df_m = df_1m.copy()
+                        df_m['Time'] = df_m.index.tz_convert('Asia/Taipei')
+                        latest_time = df_m['Time'].iloc[-1]
+                        today_start = latest_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                        df_today = df_m[df_m['Time'] >= today_start].copy()
+                        
+                        if len(df_today) > 5:
+                            df_today['Vol_MA10'] = df_today['Volume'].rolling(10, min_periods=1).mean()
+                            avg_vol_day = df_today['Volume'].mean()
+                            spike_cond = (df_today['Volume'] > df_today['Vol_MA10'] * 2.0) & (df_today['Volume'] > avg_vol_day * 1.5) & (df_today['Volume'] >= 50000)
+                            spikes = df_today[spike_cond].copy()
+                            
+                            if not spikes.empty:
+                                curr_p = prices_dict.get(code, (None, None))[0]
+                                if curr_p is None: curr_p = df_today['Close'].iloc[-1]
+                                max_spike = spikes.loc[spikes['Volume'].idxmax()]
+                                t_str = max_spike['Time'].strftime("%H:%M"); is_buy = max_spike['Close'] >= max_spike['Open']
+                                action = "大單敲進" if is_buy else "大單倒貨"; v_disp = max_spike['Volume'] / 1000
+                                found_targets.append({"code": code, "price": curr_p, "time": t_str, "vol": v_disp, "action": action, "is_buy": is_buy})
+                
+                progress_bar.empty()
+                if found_targets:
+                    st.success(f"🎯 掃描完畢！共發現 **{len(found_targets)}** 檔股票出現異常爆量：")
+                    for t in found_targets:
+                        with st.container(border=True):
+                            c1, c2, c3 = st.columns([2, 3, 1])
+                            c1.markdown(f"#### **{t['code']}**"); icon = "🔴" if t['is_buy'] else "🟢"; color = "#ef4444" if t['is_buy'] else "#10b981"
+                            c2.markdown(f"現價: **{t['price']}** <br> <span style='color:{color}'>{icon} {t['time']} | 爆出 {t['vol']:,.0f} 張 ({t['action']})</span>", unsafe_allow_html=True)
+                            if c3.button("➕ 加入監控", key=f"radar_add_{t['code']}"): cb_add_tw(t['code'], t['code']); st.rerun()
+                else: st.info("掃描完畢。目前的目標池中尚未發現明顯的 5K/15K 爆量跡象。")
+
+if auto_refresh:
+    time.sleep(3)
+    try: st.rerun()
+    except AttributeError: st.experimental_rerun()
