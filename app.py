@@ -185,7 +185,7 @@ if 'initialized' not in st.session_state:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = http_session.get(url, timeout=10, headers=headers).json()
@@ -423,7 +423,7 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
     return []
 
 # --- 📊 視覺圖表引擎 ---
-# 🔥 修復大盤走勢不會跳動：強制對齊現在時間並塞入最新現價
+# 🔥 修復大盤走勢不會跳動：不丟棄 NaN，強制綁定全日時間軸
 def render_index_sparkline(df, prev_close, curr_p, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
@@ -441,6 +441,7 @@ def render_index_sparkline(df, prev_close, curr_p, market_type="TW"):
         start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
         end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
     
+    # 建立全日的完整時間軸
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     df_chart = df_chart.reindex(full_index)
     
@@ -450,8 +451,9 @@ def render_index_sparkline(df, prev_close, curr_p, market_type="TW"):
     past_mask = df_chart.index <= now_time
     df_chart.loc[past_mask, 'Close'] = df_chart.loc[past_mask, 'Close'].ffill()
     
+    # 強制將最新報價塞入現在時刻
     if curr_p is not None:
-        last_valid_idx = df_chart['Close'].last_valid_index()
+        last_valid_idx = df_chart.loc[past_mask, 'Close'].last_valid_index()
         if last_valid_idx is not None:
             if now_time >= last_valid_idx:
                 last_close = df_chart.loc[last_valid_idx, 'Close']
@@ -460,27 +462,27 @@ def render_index_sparkline(df, prev_close, curr_p, market_type="TW"):
             else:
                 df_chart.loc[last_valid_idx, 'Close'] = curr_p
                 
-    df_chart = df_chart.dropna(subset=['Close'])
-    if df_chart.empty: return
-        
     df_chart.index.name = 'Time'
     df_chart = df_chart.reset_index()
+    # 永遠保證 X 軸長度是固定的 270 分鐘，未來未發生的時間為 NaN (Altair 不會畫，也不會拉伸)
     df_chart['x_idx'] = np.arange(len(df_chart))
+    end_idx = len(df_chart) - 1 
+    
+    valid_closes = df_chart['Close'].dropna()
+    if valid_closes.empty: return
     
     color = ("#ef4444" if market_type == "TW" else "#10b981") if curr_p >= prev_close else ("#10b981" if market_type == "TW" else "#ef4444")
-    y_min = min(df_chart['Close'].min(), prev_close)
-    y_max = max(df_chart['Close'].max(), prev_close)
+    y_min = min(valid_closes.min(), prev_close)
+    y_max = max(valid_closes.max(), prev_close)
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
-    end_idx = len(df_chart) - 1
     base = alt.Chart(df_chart).encode(x=alt.X('x_idx:Q', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False, title='')))
     line = base.mark_line(color=color, strokeWidth=2).encode(y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False), axis=alt.Axis(labels=False, ticks=False, grid=False, title='')))
     rule = alt.Chart(pd.DataFrame({'p': [prev_close]})).mark_rule(color='#94a3b8', strokeDash=[3,3], strokeWidth=1.5).encode(y='p:Q')
     area = base.mark_area(color=alt.Gradient(gradient='linear', stops=[alt.GradientStop(color=color, offset=0), alt.GradientStop(color='rgba(0,0,0,0)', offset=1)], x1=1, x2=1, y1=0, y2=1), opacity=0.3).encode(y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False)), y2=alt.datum(y_min))
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
-# 🔥 個股走勢無縫跳動修復
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -584,7 +586,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-# 🔥 K棒消失終極修復：明確給予 K 棒寬度，並切斷 5K/15K 的時間軸延展
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -633,7 +634,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         df_chart = df_chart.reset_index()
         start_idx = 0; end_idx = len(pd.date_range(start=start_time, end=end_time, freq='1min')) - 1
         
-    else: # 5K, 15K, 日K (不延展時間軸，純展示歷史連續 K 棒)
+    else:
         if curr_p is not None and not df_chart.empty:
             last_idx = df_chart.index[-1]
             df_chart.at[last_idx, 'Close'] = curr_p
@@ -647,7 +648,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
-        start_idx = max(0, len(df_chart) - 80) # 顯示最近 80 根連續 K 棒
+        start_idx = max(0, len(df_chart) - 80)
         end_idx = len(df_chart) - 1
 
     if df_chart.empty: return
@@ -655,8 +656,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     df_chart['x_idx'] = np.arange(len(df_chart))
     axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
     df_chart['TimeStr'] = df_chart['Time'].dt.strftime(axis_format)
-    
-    # 十字線保護：避免 Open == Close 時 K 棒高度為 0 而消失
     df_chart['Draw_Close'] = np.where(df_chart['Close'] == df_chart['Open'], df_chart['Close'] + (df_chart['Close'] * 0.0005), df_chart['Close'])
     
     valid_lows = df_chart['Low'].dropna()
@@ -671,7 +670,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     layers = []
     if "K棒" in visible_layers:
-        # 🔥 加入 size 參數強迫賦予 K 棒像素寬度，解決縮成一條線隱形的問題
         rule = base.mark_rule(size=1.5).encode(y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
         bar = base.mark_bar(size=5).encode(y='Open:Q', y2='Draw_Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
         layers.extend([rule, bar])
@@ -829,7 +827,7 @@ _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
 with col_t1:
     if curr_twii and prev_twii:
         diff = curr_twii - prev_twii; pct = diff / prev_twii * 100
-        st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+        st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
         if not df_twii.empty: render_index_sparkline(df_twii, prev_twii, curr_twii, "TW")
         else: st.caption("走勢圖暫無資料")
     else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
@@ -837,7 +835,7 @@ with col_t1:
 with col_t2:
     if curr_twoii and prev_twoii:
         diff = curr_twoii - prev_twoii; pct = diff / prev_twoii * 100
-        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
         if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii, curr_twoii, "TW")
         else: st.caption("⚠️ Yahoo 暫無上櫃分K")
     else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
@@ -845,7 +843,7 @@ with col_t2:
 with col_t3:
     if curr_ixic and prev_ixic:
         diff = curr_ixic - prev_ixic; pct = diff / prev_ixic * 100
-        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{curr_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal")
+        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{curr_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
     else: st.metric("🇺🇸 納斯達克 (Nasdaq)", "讀取中...", "--")
 
 with col_t4:
@@ -931,7 +929,7 @@ with tab_tw:
             c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.5, 1.5, 1, 1, 0.5])
             with c_title: st.markdown(f"#### {name}({code})")
             
-            # 🔥 新增漲跌幅(%) 與 漲跌停紅綠底高亮機制
+            # 🔥 新增漲跌幅(%) 與 漲跌停紅綠底高亮機制 (加入 !important 避免被背景 CSS 覆蓋)
             diff = curr_p - prev_p
             pct = (diff / prev_p) * 100 if prev_p > 0 else 0
             is_limit_up = pct >= 9.85
@@ -939,11 +937,11 @@ with tab_tw:
             
             with c_p:
                 if is_limit_up:
-                    st.markdown(f"<div style='background-color:#ef4444; border-radius:8px; padding:10px; text-align:center; box-shadow: 0 0 10px rgba(239,68,68,0.5);'><div style='font-size:0.8rem; color:#fee2e2; margin-bottom:2px;'>實時現價 🚀 漲停</div><div style='font-size:1.6rem; font-weight:700; color:white; line-height:1;'>{curr_p:.2f}</div><div style='font-size:0.85rem; color:#fecaca; margin-top:2px;'>+{diff:.2f} (+{pct:.2f}%)</div></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='background-color:#ef4444 !important; border-radius:8px !important; padding:8px 0px !important; text-align:center; box-shadow: 0 0 8px rgba(239,68,68,0.6) !important;'><div style='font-size:0.75rem; color:#fee2e2; margin-bottom:0px;'>實時現價 🚀 漲停</div><div style='font-size:1.4rem; font-weight:700; color:white; line-height:1.2;'>{curr_p:.2f}</div><div style='font-size:0.8rem; color:#fecaca;'>+{diff:.2f} (+{pct:.2f}%)</div></div>", unsafe_allow_html=True)
                 elif is_limit_down:
-                    st.markdown(f"<div style='background-color:#10b981; border-radius:8px; padding:10px; text-align:center; box-shadow: 0 0 10px rgba(16,185,129,0.5);'><div style='font-size:0.8rem; color:#d1fae5; margin-bottom:2px;'>實時現價 💥 跌停</div><div style='font-size:1.6rem; font-weight:700; color:white; line-height:1;'>{curr_p:.2f}</div><div style='font-size:0.85rem; color:#a7f3d0; margin-top:2px;'>{diff:.2f} ({pct:.2f}%)</div></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='background-color:#10b981 !important; border-radius:8px !important; padding:8px 0px !important; text-align:center; box-shadow: 0 0 8px rgba(16,185,129,0.6) !important;'><div style='font-size:0.75rem; color:#d1fae5; margin-bottom:0px;'>實時現價 💥 跌停</div><div style='font-size:1.4rem; font-weight:700; color:white; line-height:1.2;'>{curr_p:.2f}</div><div style='font-size:0.8rem; color:#a7f3d0;'>{diff:.2f} ({pct:.2f}%)</div></div>", unsafe_allow_html=True)
                 else:
-                    st.metric("實時現價", f"{curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+                    st.metric("實時現價", f"{curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
             
             with c_pnl:
                 if my_p > 0:
@@ -958,13 +956,15 @@ with tab_tw:
                 if st.button("❌", key=f"del_tw_{code}"): cb_remove_tw(idx); st.rerun()
             
             if is_alert: st.error(f"🚨 **到價警示！** 現價 {curr_p} 已觸發設定目標")
-            if stock.get('ai_advice', ''): st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{stock.get('ai_advice', '')}</div>", unsafe_allow_html=True)
+            
+            # 🔥 修正負邊距，避免與漲跌停框重疊
+            if stock.get('ai_advice', ''): st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:5px;margin-bottom:10px;'>{stock.get('ai_advice', '')}</div>", unsafe_allow_html=True)
             
             corr_codes = get_correlated_stocks(code, name, API_KEY, is_us=False)
             if not corr_codes:
                 if API_KEY:
                     col_m, col_b = st.columns([5, 1])
-                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動：</b> AI 正在重新鎖定中，請重試。</div>", unsafe_allow_html=True)
+                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:5px; margin-bottom:10px;'>🔗 <b>族群聯動：</b> AI 正在重新鎖定中，請重試。</div>", unsafe_allow_html=True)
                     if col_b.button("🔄 重試", key=f"retry_corr_tw_{code}"): get_correlated_stocks.clear(code, name, API_KEY, is_us=False); st.rerun()
             else:
                 corr_display = []
@@ -977,7 +977,8 @@ with tab_tw:
                         color_c = '#ef4444' if diff_c > 0 else '#10b981' if diff_c < 0 else '#94a3b8'
                         corr_display.append(f"<b>{icon} {c_name}({c})</b> {cp:.2f} (<span style='color:{color_c}'>{sign_c}{diff_c:.2f}, {sign_c}{pct_c:.2f}%</span>)")
                     else: corr_display.append(f"<b>{icon} {c_name}({c})</b> 讀取中...")
-                st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
+                # 🔥 修正負邊距，避免與漲跌停框重疊
+                st.markdown(f"<div style='font-size:0.95rem; margin-top:5px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
             
             st.divider()
 
@@ -1064,7 +1065,7 @@ with tab_tw:
 with tab_us:
     if not st.session_state.us_stocks: st.info("請至側邊欄加入美股標的。")
     for idx, stock in enumerate(st.session_state.us_stocks):
-        code = stock['code']; alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '')
+        code = stock['code']; alerts = stock.get('alerts', [])
         
         df_daily, suffix = get_historical_features(code, is_us=True)
         df_1m_us, curr_p, prev_p = get_realtime_tick_and_price(code, suffix, fast_cache_key)
@@ -1125,7 +1126,7 @@ with tab_us:
             # 🔥 新增漲跌幅(%)
             diff = curr_p - prev_p
             pct = (diff / prev_p) * 100 if prev_p > 0 else 0
-            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal")
+            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal" if diff >= 0 else "inverse")
             
             with c_pnl:
                 if my_p_us > 0:
@@ -1140,13 +1141,15 @@ with tab_us:
                 if st.button("❌", key=f"del_us_{code}"): cb_remove_us(idx); st.rerun()
             
             if is_alert: st.error(f"🚨 **到價警示！** 現價 ${curr_p} 已觸發設定目標")
-            if stock.get('ai_advice', ''): st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:-15px;margin-bottom:10px;'>{stock.get('ai_advice', '')}</div>", unsafe_allow_html=True)
+            
+            # 🔥 修正負邊距，避免與聯動框重疊
+            if stock.get('ai_advice', ''): st.markdown(f"<div style='color:#10b981;font-size:0.85rem;margin-top:5px;margin-bottom:10px;'>{stock.get('ai_advice', '')}</div>", unsafe_allow_html=True)
             
             corr_codes = get_correlated_stocks(code, code, API_KEY, is_us=True)
             if not corr_codes:
                 if API_KEY:
                     col_m, col_b = st.columns([5, 1])
-                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:-10px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
+                    col_m.markdown("<div style='font-size:0.9rem; color:#94a3b8; margin-top:5px; margin-bottom:10px;'>🔗 <b>族群聯動雷達：</b> 網路擁塞，暫無資料。</div>", unsafe_allow_html=True)
                     if col_b.button("🔄 重試", key=f"retry_corr_us_{code}"): get_correlated_stocks.clear(code, code, API_KEY, is_us=True); st.rerun()
             else:
                 corr_display = []
@@ -1158,7 +1161,8 @@ with tab_us:
                         color_c = '#10b981' if diff_c > 0 else '#ef4444' if diff_c < 0 else '#94a3b8'
                         corr_display.append(f"<b>{icon} {c}</b> {cp:.2f} (<span style='color:{color_c};'>{sign_c}{diff_c:.2f}, {sign_c}{pct_c:.2f}%</span>)")
                     else: corr_display.append(f"<b>{icon} {c}</b> 讀取中...")
-                st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
+                # 🔥 修正負邊距，避免與聯動框重疊
+                st.markdown(f"<div style='font-size:0.95rem; margin-top:5px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
             
             st.divider()
             
@@ -1336,7 +1340,7 @@ with tab_radar:
                             c1.markdown(f"#### **{t['code']}**"); icon = "🔴" if t['is_buy'] else "🟢"; color = "#ef4444" if t['is_buy'] else "#10b981"
                             c2.markdown(f"現價: **{t['price']}** <br> <span style='color:{color}'>{icon} {t['time']} | 爆出 {t['vol']:,.0f} 張 ({t['action']})</span>", unsafe_allow_html=True)
                             if c3.button("➕ 加入監控", key=f"radar_add_{t['code']}"): cb_add_tw(t['code'], t['code']); st.rerun()
-                else: st.info("掃描完畢。目前的目標池中尚未發現明顯的 5K/15K 爆量跡象。")
+                else: st.info("掃描完畢。目前的目標池中尚未發現明顯的異常大單跡象。")
 
 if auto_refresh:
     time.sleep(3)
