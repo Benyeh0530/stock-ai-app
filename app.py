@@ -521,8 +521,8 @@ with st.sidebar:
         selected_tw = st.selectbox("🔍 搜尋台股代碼 (下拉或輸入)", options=["請點此搜尋..."] + stock_list, index=0)
         if selected_tw != "請點此搜尋...":
             parts = selected_tw.split(" "); code = parts[0]; name = " ".join(parts[1:])
-            if st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}"):
-                cb_add_tw(code, name); st.rerun()
+            # 👇 修正：改用 on_click 與 args 綁定事件，不用再寫 if 與 st.rerun()
+            st.button(f"➕ 加入 {name} (台股)", key=f"add_tw_sel_{code}", on_click=cb_add_tw, args=(code, name))
     else:
         st.error("⚠️ 證交所 API 暫時阻擋雲端主機，下拉選單無法載入。請直接使用下方【手動加入】。")
         if st.button("🔄 重新嘗試連線", use_container_width=True):
@@ -534,14 +534,14 @@ with st.sidebar:
         tw_code = st.text_input("🇹🇼 輸入台股代碼 (如 2330, 9933)").strip()
         if tw_code:
             tw_name = all_stocks.get(tw_code, tw_code)
-            if st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}"):
-                cb_add_tw(tw_code, tw_name); st.rerun()
+            # 👇 修正：同步改用 on_click 強化穩定性
+            st.button(f"➕ 強制加入 {tw_name} (台股)", key=f"add_tw_man_{tw_code}", on_click=cb_add_tw, args=(tw_code, tw_name))
 
     st.markdown("---")
     us_code = st.text_input("🇺🇸 輸入美股代碼 (如 NVDA)").strip().upper()
     if us_code: 
-        if st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}"):
-            cb_add_us(us_code, us_code); st.rerun()
+        # 👇 修正：美股也同步改用 on_click
+        st.button(f"➕ 加入 {us_code} (美股)", key=f"add_us_man_{us_code}", on_click=cb_add_us, args=(us_code, us_code))
 
     if st.button("🗑️ 徹底清空所有資料", type="secondary"):
         cb_clear_all(); st.rerun()
