@@ -70,10 +70,13 @@ if 'agent_url' not in st.session_state:
 
 def send_telegram_alert(msg):
     st.toast(f"🔔 內部觸發警報: {msg[:25]}...", icon="🚨")
-    if not TG_BOT_TOKEN or not TG_CHAT_ID: return
+    if not TG_BOT_TOKEN or not TG_CHAT_ID: 
+        st.error("⚠️ Telegram 推播失敗：您尚未設定 TG_BOT_TOKEN 或 TELEGRAM_CHAT_ID。")
+        return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    try: http_session.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
-    except Exception: pass
+    try: 
+        res = http_session.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
+    except Exception as e: pass
 
 def fire_order_to_agent(code, price, action, qty=1):
     url = f"{st.session_state.agent_url.rstrip('/')}/api/order"
@@ -81,7 +84,8 @@ def fire_order_to_agent(code, price, action, qty=1):
     try:
         response = http_session.post(url, json=payload, headers={"ngrok-skip-browser-warning": "true"}, timeout=3)
         return {"status": "success"} if response.status_code == 200 else {"status": "error", "msg": f"地端回應錯誤碼: {response.status_code}"}
-    except Exception: return {"status": "error", "msg": "無法連線至地端 Agent"}
+    except Exception as e:
+        return {"status": "error", "msg": "無法連線至地端 Agent"}
 
 def calc_tw_pnl(entry_price, current_price, lots, direction="作多", trade_type="當沖"):
     shares = lots * 1000; discount = 0.18; tax_rate = 0.0015 if trade_type == "當沖" else 0.003
@@ -112,17 +116,29 @@ def save_watchlist(tw, us):
 def cb_add_tw(code, name, target_price=0.0, condition=">="):
     exists = False
     for s in st.session_state.tw_stocks:
-        if s['code'] == code: exists = True; break
+        if s['code'] == code:
+            exists = True
+            s['alerts'].append({"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
+            break
     if not exists:
-        st.session_state.tw_stocks.append({"code": code, "name": name, "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], "ai_advice": "", "vol_alert_triggered": False, "my_trade_type": "當沖", "my_price": 0.0, "my_lots": 1, "my_dir": "作多", "auto_trade": False})
+        st.session_state.tw_stocks.append({
+            "code": code, "name": name, "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
+            "ai_advice": "", "vol_alert_triggered": False, "my_trade_type": "當沖", "my_price": 0.0, "my_lots": 1, "my_dir": "作多", "auto_trade": False
+        })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_add_us(code, name, target_price=0.0, condition=">="):
     exists = False
     for s in st.session_state.us_stocks:
-        if s['code'] == code: exists = True; break
+        if s['code'] == code:
+            exists = True
+            s['alerts'].append({"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False})
+            break
     if not exists:
-        st.session_state.us_stocks.append({"code": code, "name": name, "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], "ai_advice": "", "my_price": 0.0, "my_shares": 10, "my_dir": "作多", "auto_trade": False})
+        st.session_state.us_stocks.append({
+            "code": code, "name": name, "alerts": [{"type": "固定價格", "price": float(target_price), "cond": condition, "triggered": False, "touch_2_triggered": False}], 
+            "ai_advice": "", "my_price": 0.0, "my_shares": 10, "my_dir": "作多", "auto_trade": False
+        })
     save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
 
 def cb_remove_tw(idx): st.session_state.tw_stocks.pop(idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks)
@@ -169,7 +185,7 @@ if 'initialized' not in st.session_state:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_full_stock_db():
     db = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = http_session.get(url, timeout=10, headers=headers).json()
@@ -303,7 +319,7 @@ def get_historical_features(code, is_us=False):
         except: continue
     return pd.DataFrame(), ""
 
-# 🔥 V8 雙效引擊 (取代舊版容易卡死的 v7/quote)
+# 🔥 V8 雙效引擊
 @st.cache_data(ttl=1, max_entries=100, show_spinner=False)
 def get_realtime_tick_and_price(code, suffix, cache_buster):
     if suffix is None: return pd.DataFrame(), None, None
@@ -407,7 +423,8 @@ def get_correlated_stocks(code, name, key_hash, is_us=False):
     return []
 
 # --- 📊 視覺圖表引擎 ---
-def render_index_sparkline(df, prev_close, market_type="TW"):
+# 🔥 修復大盤走勢不會跳動：強制對齊現在時間並塞入最新現價
+def render_index_sparkline(df, prev_close, curr_p, market_type="TW"):
     if df.empty or prev_close is None: return
     df_chart = df.copy()
     tz_str = 'Asia/Taipei' if market_type == "TW" else 'America/New_York'
@@ -429,23 +446,30 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     
     now_time = pd.Timestamp.now(tz=tz_str).floor('min')
     if now_time > end_time: now_time = end_time
+    
     past_mask = df_chart.index <= now_time
     df_chart.loc[past_mask, 'Close'] = df_chart.loc[past_mask, 'Close'].ffill()
+    
+    if curr_p is not None:
+        last_valid_idx = df_chart['Close'].last_valid_index()
+        if last_valid_idx is not None:
+            if now_time >= last_valid_idx:
+                last_close = df_chart.loc[last_valid_idx, 'Close']
+                df_chart.loc[last_valid_idx:now_time, 'Close'] = last_close
+                df_chart.loc[now_time, 'Close'] = curr_p
+            else:
+                df_chart.loc[last_valid_idx, 'Close'] = curr_p
+                
     df_chart = df_chart.dropna(subset=['Close'])
+    if df_chart.empty: return
         
     df_chart.index.name = 'Time'
     df_chart = df_chart.reset_index()
     df_chart['x_idx'] = np.arange(len(df_chart))
     
-    valid_closes = df_chart['Close'].dropna()
-    if valid_closes.empty: return
-    curr_p = valid_closes.iloc[-1]
-    
-    if market_type == "TW": color = "#ef4444" if curr_p >= prev_close else "#10b981"
-    else: color = "#10b981" if curr_p >= prev_close else "#ef4444"
-    
-    y_min = min(valid_closes.min(), prev_close)
-    y_max = max(valid_closes.max(), prev_close)
+    color = ("#ef4444" if market_type == "TW" else "#10b981") if curr_p >= prev_close else ("#10b981" if market_type == "TW" else "#ef4444")
+    y_min = min(df_chart['Close'].min(), prev_close)
+    y_max = max(df_chart['Close'].max(), prev_close)
     buffer = (y_max - y_min) * 0.05 if y_max != y_min else curr_p * 0.001
     y_min -= buffer; y_max += buffer
     
@@ -456,6 +480,7 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     area = base.mark_area(color=alt.Gradient(gradient='linear', stops=[alt.GradientStop(color=color, offset=0), alt.GradientStop(color='rgba(0,0,0,0)', offset=1)], x1=1, x2=1, y1=0, y2=1), opacity=0.3).encode(y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False)), y2=alt.datum(y_min))
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
+# 🔥 個股走勢無縫跳動修復
 def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
@@ -486,8 +511,13 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     chart_df.loc[past_mask, 'Volume'] = chart_df.loc[past_mask, 'Volume'].fillna(0)
     
     if curr_p is not None and last_valid_idx is not None:
-        if now_time >= last_valid_idx: chart_df.loc[now_time, 'Close'] = curr_p
-        else: chart_df.loc[last_valid_idx, 'Close'] = curr_p
+        if now_time >= last_valid_idx:
+            last_close = chart_df.loc[last_valid_idx, 'Close']
+            chart_df.loc[last_valid_idx:now_time, 'Close'] = last_close
+            chart_df.loc[last_valid_idx:now_time, 'Open'] = last_close
+            chart_df.loc[now_time, 'Close'] = curr_p
+        else:
+            chart_df.loc[last_valid_idx, 'Close'] = curr_p
         
     chart_df.index.name = 'Time'
     chart_df = chart_df.reset_index()
@@ -508,12 +538,17 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     
     if cdp_nh > 0 and cdp_nl > 0:
         valid_prices = pd.concat([valid_prices, pd.Series([cdp_nh, cdp_nl])])
-        color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)']); color_range.extend(['#ef4444', '#10b981'])
+        color_domain.extend(['CDP_NH(壓力)', 'CDP_NL(支撐)'])
+        color_range.extend(['#ef4444', '#10b981'])
 
     y_min, y_max = (valid_prices.min() * 0.995, valid_prices.max() * 1.005) if not valid_prices.empty else (0, 100)
 
     base = alt.Chart(df_melted).encode(x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False, grid=False)))
-    line = base.mark_line(strokeWidth=2.5).encode(y=alt.Y('價格:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0)))
+    
+    line = base.mark_line(strokeWidth=2.5).encode(
+        y=alt.Y('價格:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')),
+        color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range), legend=alt.Legend(title="", orient="top", padding=0))
+    )
 
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
     points = line.mark_circle(size=80).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0)), tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), '線型', alt.Tooltip('價格:Q', format='.2f')]).add_params(hover)
@@ -522,8 +557,10 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
 
     alert_layers = []
     if cdp_nh > 0 and cdp_nl > 0:
-        cdp_rule = alt.Chart(pd.DataFrame({'價格': [cdp_nh, cdp_nl], '線型': ['CDP_NH(壓力)', 'CDP_NL(支撐)']})).mark_rule(strokeWidth=2).encode(y='價格:Q', color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range)))
+        cdp_df = pd.DataFrame({'價格': [cdp_nh, cdp_nl], '線型': ['CDP_NH(壓力)', 'CDP_NL(支撐)']})
+        cdp_rule = alt.Chart(cdp_df).mark_rule(strokeWidth=2).encode(y='價格:Q', color=alt.Color('線型:N', scale=alt.Scale(domain=color_domain, range=color_range)))
         alert_layers.append(cdp_rule)
+        
     for al in alerts:
         if al.get('type') == '固定價格' and al.get('price', 0) > 0:
             alert_layers.append(alt.Chart(pd.DataFrame({'價格': [al['price']]})).mark_rule(color='#eab308', strokeWidth=2, strokeDash=[4, 4]).encode(y='價格:Q'))
@@ -535,9 +572,19 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     
     base_vol = alt.Chart(chart_df.dropna(subset=['Volume'])).encode(x=alt.X('x_idx:Q', title='', scale=alt.Scale(domain=[0, end_idx]), axis=alt.Axis(labels=False, ticks=False)))
     v_rules_vol = base_vol.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
-    vol_chart = alt.layer(base_vol.mark_bar(opacity=0.6).encode(y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)), color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)), tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]), v_rules_vol).properties(height=60)
+    
+    vol_chart = alt.layer(
+        base_vol.mark_bar(opacity=0.6).encode(
+            y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
+            tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+        ),
+        v_rules_vol
+    ).properties(height=60)
+
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
+# 🔥 K棒消失終極修復：明確給予 K 棒寬度，並切斷 5K/15K 的時間軸延展
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
     elif tf == "5K": df = df_5k
@@ -586,7 +633,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         df_chart = df_chart.reset_index()
         start_idx = 0; end_idx = len(pd.date_range(start=start_time, end=end_time, freq='1min')) - 1
         
-    else:
+    else: # 5K, 15K, 日K (不延展時間軸，純展示歷史連續 K 棒)
         if curr_p is not None and not df_chart.empty:
             last_idx = df_chart.index[-1]
             df_chart.at[last_idx, 'Close'] = curr_p
@@ -600,15 +647,23 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
-        start_idx = max(0, len(df_chart) - 80)
+        start_idx = max(0, len(df_chart) - 80) # 顯示最近 80 根連續 K 棒
         end_idx = len(df_chart) - 1
 
     if df_chart.empty: return
-    
+
     df_chart['x_idx'] = np.arange(len(df_chart))
-    df_chart['TimeStr'] = df_chart['Time'].dt.strftime('%y/%m/%d' if tf == "日K" else '%m/%d %H:%M')
+    axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
+    df_chart['TimeStr'] = df_chart['Time'].dt.strftime(axis_format)
     
-    y_min, y_max = df_chart['Low'].min() * 0.995, df_chart['High'].max() * 1.005
+    # 十字線保護：避免 Open == Close 時 K 棒高度為 0 而消失
+    df_chart['Draw_Close'] = np.where(df_chart['Close'] == df_chart['Open'], df_chart['Close'] + (df_chart['Close'] * 0.0005), df_chart['Close'])
+    
+    valid_lows = df_chart['Low'].dropna()
+    valid_highs = df_chart['High'].dropna()
+    y_min = valid_lows.min() * 0.995 if not valid_lows.empty else 0
+    y_max = valid_highs.max() * 1.005 if not valid_highs.empty else 100
+    
     up_color = "#ef4444" if not is_us else "#10b981"
     down_color = "#10b981" if not is_us else "#ef4444"
     pan_zoom = alt.selection_interval(bind='scales', encodings=['x'])
@@ -616,21 +671,30 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     layers = []
     if "K棒" in visible_layers:
+        # 🔥 加入 size 參數強迫賦予 K 棒像素寬度，解決縮成一條線隱形的問題
         rule = base.mark_rule(size=1.5).encode(y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
-        bar = base.mark_bar(size=5).encode(y='Open:Q', y2='Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
+        bar = base.mark_bar(size=5).encode(y='Open:Q', y2='Draw_Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
         layers.extend([rule, bar])
     
     ma_colors = {'MA3': '#f59e0b', 'MA5': '#3b82f6', 'MA10': '#a855f7', 'MA23': '#ec4899'}
     for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
-        if ma in visible_layers and ma in df_chart.columns: layers.append(base.mark_line(size=1.5, opacity=0.8).encode(y=alt.Y(f'{ma}:Q'), color=alt.value(ma_colors[ma])))
+        if ma in visible_layers and ma in df_chart.columns:
+            layers.append(base.mark_line(size=1.5, opacity=0.8).encode(y=alt.Y(f'{ma}:Q'), color=alt.value(ma_colors[ma])))
             
     for al in alerts:
-        if al.get('type') == '固定價格' and al.get('price', 0) > 0: layers.append(alt.Chart(pd.DataFrame({'價格': [al['price']]})).mark_rule(color='#eab308', strokeWidth=2, strokeDash=[4, 4]).encode(y='價格:Q'))
+        if al.get('type') == '固定價格' and al.get('price', 0) > 0:
+            layers.append(alt.Chart(pd.DataFrame({'價格': [al['price']]})).mark_rule(color='#eab308', strokeWidth=2, strokeDash=[4, 4]).encode(y='價格:Q'))
             
-    if not layers: return st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
+    if not layers:
+        st.altair_chart(alt.Chart(pd.DataFrame({'x': [0], 'y': [0], 't': ['👀 已隱藏所有圖層']})).mark_text(size=18, color='#94a3b8').encode(text='t:N').properties(height=260), use_container_width=True)
+        return
 
     hover = alt.selection_point(fields=['x_idx'], nearest=True, on='mouseover', empty=False)
-    tooltip_data = [alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Open:Q', format='.2f', title='開盤'), alt.Tooltip('High:Q', format='.2f', title='最高'), alt.Tooltip('Low:Q', format='.2f', title='最低'), alt.Tooltip('Close:Q', format='.2f', title='收盤')]
+    tooltip_data = [
+        alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Open:Q', format='.2f', title='開盤'),
+        alt.Tooltip('High:Q', format='.2f', title='最高'), alt.Tooltip('Low:Q', format='.2f', title='最低'),
+        alt.Tooltip('Close:Q', format='.2f', title='收盤'), alt.Tooltip('Volume:Q', format=',.0f', title='成交量')
+    ]
     for ma in ['MA3', 'MA5', 'MA10', 'MA23']:
         if ma in visible_layers and ma in df_chart.columns: tooltip_data.append(alt.Tooltip(f'{ma}:Q', format='.2f', title=ma))
 
@@ -638,21 +702,30 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     v_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     h_rule = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(y='Close:Q', opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
 
-    main_kline = alt.layer(*layers, hover_points, v_rule, h_rule).properties(height=200).add_params(pan_zoom)
+    layers.extend([hover_points, v_rule, h_rule])
+    main_kline = alt.layer(*layers).properties(height=200).add_params(pan_zoom)
 
     v_rule_vol = base.mark_rule(color='#94a3b8', strokeDash=[3, 3]).encode(opacity=alt.condition(hover, alt.value(1), alt.value(0))).transform_filter(hover)
     vol_chart = alt.layer(
-        base.mark_bar(opacity=0.6).encode(y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)), color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)), tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]),
+        base.mark_bar(opacity=0.6).encode(
+            y=alt.Y('Volume:Q', title='量', axis=alt.Axis(labels=False, grid=False)),
+            color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)),
+            tooltip=[alt.Tooltip('TimeStr:N', title='時間'), alt.Tooltip('Volume:Q', title='成交量')]
+        ),
         v_rule_vol
     ).properties(height=60)
 
+    def format_ma(val): return f"{val:.2f}" if pd.notna(val) else "--"
+    valid_ma_df = df_chart.dropna(subset=['Close'])
+    last_idx = valid_ma_df.index[-1] if not valid_ma_df.empty else -1
+    
     ma_info = f"<div style='font-size:0.85rem; color:#cbd5e1; margin-top:-5px; margin-bottom:8px; text-align:right;'>📊 "
-    last_idx = df_chart.dropna(subset=['Close']).index[-1] if not df_chart.dropna(subset=['Close']).empty else -1
-    if "MA3" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {df_chart['MA3'].iloc[last_idx]:.2f}</span> &nbsp; "
-    if "MA5" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#3b82f6; font-weight:bold;'>MA5: {df_chart['MA5'].iloc[last_idx]:.2f}</span> &nbsp; "
-    if "MA10" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#a855f7; font-weight:bold;'>MA10: {df_chart['MA10'].iloc[last_idx]:.2f}</span> &nbsp; "
-    if "MA23" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#ec4899; font-weight:bold;'>MA23: {df_chart['MA23'].iloc[last_idx]:.2f}</span>"
-    st.markdown(ma_info + "</div>", unsafe_allow_html=True)
+    if "MA3" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#f59e0b; font-weight:bold;'>MA3: {format_ma(df_chart['MA3'].iloc[last_idx])}</span> &nbsp; "
+    if "MA5" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#3b82f6; font-weight:bold;'>MA5: {format_ma(df_chart['MA5'].iloc[last_idx])}</span> &nbsp; "
+    if "MA10" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#a855f7; font-weight:bold;'>MA10: {format_ma(df_chart['MA10'].iloc[last_idx])}</span> &nbsp; "
+    if "MA23" in visible_layers and last_idx >= 0: ma_info += f"<span style='color:#ec4899; font-weight:bold;'>MA23: {format_ma(df_chart['MA23'].iloc[last_idx])}</span>"
+    ma_info += "</div>"
+    st.markdown(ma_info, unsafe_allow_html=True)
     st.altair_chart(alt.vconcat(main_kline, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
 # --- 側邊欄 ---
@@ -755,16 +828,29 @@ _, curr_ixic, prev_ixic = get_index_data_engine('^IXIC', fast_cache_key)
 
 with col_t1:
     if curr_twii and prev_twii:
-        st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{curr_twii-prev_twii:+.2f} ({(curr_twii-prev_twii)/prev_twii*100:+.2f}%)", delta_color="normal" if curr_twii>=prev_twii else "inverse")
-        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii, "TW")
+        diff = curr_twii - prev_twii; pct = diff / prev_twii * 100
+        st.metric("🇹🇼 加權指數 (上市)", f"{curr_twii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+        if not df_twii.empty: render_index_sparkline(df_twii, prev_twii, curr_twii, "TW")
+        else: st.caption("走勢圖暫無資料")
+    else: st.metric("🇹🇼 加權指數 (上市)", "讀取中...", "--")
+
 with col_t2:
     if curr_twoii and prev_twoii:
-        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{curr_twoii-prev_twoii:+.2f} ({(curr_twoii-prev_twoii)/prev_twoii*100:+.2f}%)", delta_color="normal" if curr_twoii>=prev_twoii else "inverse")
-        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii, "TW")
+        diff = curr_twoii - prev_twoii; pct = diff / prev_twoii * 100
+        st.metric("🇹🇼 櫃買指數 (上櫃)", f"{curr_twoii:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+        if not df_twoii.empty: render_index_sparkline(df_twoii, prev_twoii, curr_twoii, "TW")
+        else: st.caption("⚠️ Yahoo 暫無上櫃分K")
+    else: st.metric("🇹🇼 櫃買指數 (上櫃)", "讀取中...", "--")
+
 with col_t3:
-    if curr_ixic and prev_ixic: st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{curr_ixic:,.2f}", f"{curr_ixic-prev_ixic:+.2f} ({(curr_ixic-prev_ixic)/prev_ixic*100:+.2f}%)", delta_color="normal" if curr_ixic>=prev_ixic else "inverse")
+    if curr_ixic and prev_ixic:
+        diff = curr_ixic - prev_ixic; pct = diff / prev_ixic * 100
+        st.metric("🇺🇸 納斯達克 (Nasdaq)", f"{curr_ixic:,.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal")
+    else: st.metric("🇺🇸 納斯達克 (Nasdaq)", "讀取中...", "--")
+
 with col_t4:
     if API_KEY: st.success(f"⚡ 實時跳動中\n\n更新: {now_tpe.strftime('%H:%M:%S')}")
+    else: st.error("🔴 API 未設定")
 
 st.divider()
 twii_mas = get_index_mas('^TWII')
@@ -842,9 +928,23 @@ with tab_tw:
 
         with st.container(border=True):
             my_p, my_l, my_dir, my_tt = float(stock.get('my_price', 0.0)), int(stock.get('my_lots', 1)), stock.get('my_dir', '作多'), stock.get('my_trade_type', '當沖')
-            c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
+            c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.5, 1.5, 1, 1, 0.5])
             with c_title: st.markdown(f"#### {name}({code})")
-            with c_p: st.metric("實時現價", f"{curr_p:.2f}", f"{curr_p - prev_p:.2f}")
+            
+            # 🔥 新增漲跌幅(%) 與 漲跌停紅綠底高亮機制
+            diff = curr_p - prev_p
+            pct = (diff / prev_p) * 100 if prev_p > 0 else 0
+            is_limit_up = pct >= 9.85
+            is_limit_down = pct <= -9.85
+            
+            with c_p:
+                if is_limit_up:
+                    st.markdown(f"<div style='background-color:#ef4444; border-radius:8px; padding:10px; text-align:center; box-shadow: 0 0 10px rgba(239,68,68,0.5);'><div style='font-size:0.8rem; color:#fee2e2; margin-bottom:2px;'>實時現價 🚀 漲停</div><div style='font-size:1.6rem; font-weight:700; color:white; line-height:1;'>{curr_p:.2f}</div><div style='font-size:0.85rem; color:#fecaca; margin-top:2px;'>+{diff:.2f} (+{pct:.2f}%)</div></div>", unsafe_allow_html=True)
+                elif is_limit_down:
+                    st.markdown(f"<div style='background-color:#10b981; border-radius:8px; padding:10px; text-align:center; box-shadow: 0 0 10px rgba(16,185,129,0.5);'><div style='font-size:0.8rem; color:#d1fae5; margin-bottom:2px;'>實時現價 💥 跌停</div><div style='font-size:1.6rem; font-weight:700; color:white; line-height:1;'>{curr_p:.2f}</div><div style='font-size:0.85rem; color:#a7f3d0; margin-top:2px;'>{diff:.2f} ({pct:.2f}%)</div></div>", unsafe_allow_html=True)
+                else:
+                    st.metric("實時現價", f"{curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="inverse")
+            
             with c_pnl:
                 if my_p > 0:
                     if st.session_state.authenticated:
@@ -873,9 +973,9 @@ with tab_tw:
                     _, cp, pp = get_realtime_tick_and_price(c, ".TW", fast_cache_key) 
                     if cp is None: _, cp, pp = get_realtime_tick_and_price(c, ".TWO", fast_cache_key)
                     if cp is not None and pp is not None and pp > 0:
-                        diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
-                        color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
-                        corr_display.append(f"<b>{icon} {c_name}({c})</b> {cp:.2f} (<span style='color:{color}'>{sign}{diff:.2f}, {sign}{pct:.2f}%</span>)")
+                        diff_c = cp - pp; pct_c = (diff_c / pp) * 100; sign_c = "+" if diff_c > 0 else ""
+                        color_c = '#ef4444' if diff_c > 0 else '#10b981' if diff_c < 0 else '#94a3b8'
+                        corr_display.append(f"<b>{icon} {c_name}({c})</b> {cp:.2f} (<span style='color:{color_c}'>{sign_c}{diff_c:.2f}, {sign_c}{pct_c:.2f}%</span>)")
                     else: corr_display.append(f"<b>{icon} {c_name}({c})</b> 讀取中...")
                 st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
             
@@ -930,17 +1030,21 @@ with tab_tw:
                     c_type, c_cond, c_inp, c_del_al = st.columns([3, 2, 3, 1])
                     opts = ["固定價格", "當日VWAP", "5分K_10MA", "15分K_10MA", "CDP_NH(壓力)", "CDP_NL(支撐)"]
                     current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
+                    
                     with c_type:
                         new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_tw_{code}_{a_idx}", label_visibility="collapsed")
-                        if new_type != current_type: st.session_state.tw_stocks[idx]['alerts'][a_idx]['type'] = new_type; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                        if new_type != current_type: 
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['type'] = new_type; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                     with c_cond:
                         new_cond = st.selectbox("方向", [">= 漲破", "<= 跌破"], index=0 if al['cond'] == ">=" else 1, key=f"cond_tw_{code}_{a_idx}", label_visibility="collapsed")
                         new_cond_val = ">=" if ">=" in new_cond else "<="
-                        if new_cond_val != al['cond']: st.session_state.tw_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                        if new_cond_val != al['cond']: 
+                            st.session_state.tw_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                     with c_inp:
                         if current_type == "固定價格":
                             new_t_price = st.number_input("警示價", value=float(al['price']), step=0.5, key=f"inp_{code}_{a_idx}", label_visibility="collapsed")
-                            if new_t_price != al['price']: st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                            if new_t_price != al['price']: 
+                                st.session_state.tw_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                         else: st.markdown(f"<div style='padding-top:5px; color:#cbd5e1;'>追蹤現值: **{mas.get(current_type, 0.0):.2f}**</div>", unsafe_allow_html=True)
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_{code}_{a_idx}"): st.session_state.tw_stocks[idx]['alerts'].pop(a_idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
@@ -960,7 +1064,7 @@ with tab_tw:
 with tab_us:
     if not st.session_state.us_stocks: st.info("請至側邊欄加入美股標的。")
     for idx, stock in enumerate(st.session_state.us_stocks):
-        code = stock['code']; alerts = stock.get('alerts', [])
+        code = stock['code']; alerts = stock.get('alerts', []); ai_advice = stock.get('ai_advice', '')
         
         df_daily, suffix = get_historical_features(code, is_us=True)
         df_1m_us, curr_p, prev_p = get_realtime_tick_and_price(code, suffix, fast_cache_key)
@@ -1007,7 +1111,7 @@ with tab_us:
                             act = "buy" if stock.get('my_dir', '作多') == "作多" else "sell"
                             res = fire_order_to_agent(code, float(stock.get('my_price', curr_p)), act, int(stock.get('my_shares', 1)))
                             if res.get('status') == 'success': send_telegram_alert(f"🚀 【自動下單成功】\n{code} 已觸發設定價\n已自動送出 {act.upper()} 委託！")
-                                
+
                 if cond == ">=" and curr_p < t_p * 0.995: st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
                 if cond == "<=" and curr_p > t_p * 1.005: st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False
 
@@ -1015,9 +1119,14 @@ with tab_us:
 
         with st.container(border=True):
             my_p_us, my_l_us, my_dir_us = float(stock.get('my_price', 0.0)), int(stock.get('my_shares', 10)), stock.get('my_dir', '作多')
-            c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.2, 1.5, 1.2, 1.2, 0.5])
+            c_title, c_p, c_pnl, c_r1, c_s1, c_del = st.columns([2.5, 1.5, 1.5, 1, 1, 0.5])
             with c_title: st.markdown(f"#### 🦅 {code}")
-            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"${curr_p - prev_p:.2f}")
+            
+            # 🔥 新增漲跌幅(%)
+            diff = curr_p - prev_p
+            pct = (diff / prev_p) * 100 if prev_p > 0 else 0
+            with c_p: st.metric("實時現價", f"${curr_p:.2f}", f"{diff:+.2f} ({pct:+.2f}%)", delta_color="normal")
+            
             with c_pnl:
                 if my_p_us > 0:
                     if st.session_state.authenticated:
@@ -1045,9 +1154,9 @@ with tab_us:
                     icon = "👑" if i == 0 else "🔗"
                     _, cp, pp = get_realtime_tick_and_price(c, "", fast_cache_key) 
                     if cp is not None and pp is not None and pp > 0:
-                        diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
-                        color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
-                        corr_display.append(f"<b>{icon} {c}</b> {cp:.2f} (<span style='color:{color};'>{sign}{diff:.2f}, {sign}{pct:.2f}%</span>)")
+                        diff_c = cp - pp; pct_c = (diff_c / pp) * 100; sign_c = "+" if diff_c > 0 else ""
+                        color_c = '#10b981' if diff_c > 0 else '#ef4444' if diff_c < 0 else '#94a3b8'
+                        corr_display.append(f"<b>{icon} {c}</b> {cp:.2f} (<span style='color:{color_c};'>{sign_c}{diff_c:.2f}, {sign_c}{pct_c:.2f}%</span>)")
                     else: corr_display.append(f"<b>{icon} {c}</b> 讀取中...")
                 st.markdown(f"<div style='font-size:0.95rem; margin-top:-10px; margin-bottom:10px; padding:8px; background-color:rgba(30,41,59,0.5); border-radius:8px;'>🔗 <b>高度聯動：</b> {' ｜ '.join(corr_display)}</div>", unsafe_allow_html=True)
             
@@ -1103,15 +1212,15 @@ with tab_us:
                     current_type = al.get('type', "固定價格") if al.get('type', "固定價格") in opts else "固定價格"
                     with c_type:
                         new_type = st.selectbox("監控目標", opts, index=opts.index(current_type), key=f"type_us_{code}_{a_idx}", label_visibility="collapsed")
-                        if new_type != current_type: st.session_state.us_stocks[idx]['alerts'][a_idx]['type'] = new_type; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                        if new_type != current_type: st.session_state.us_stocks[idx]['alerts'][a_idx]['type'] = new_type; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                     with c_cond:
                         new_cond = st.selectbox("方向", [">= 漲破", "<= 跌破"], index=0 if al['cond'] == ">=" else 1, key=f"cond_us_{code}_{a_idx}", label_visibility="collapsed")
                         new_cond_val = ">=" if ">=" in new_cond else "<="
-                        if new_cond_val != al['cond']: st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                        if new_cond_val != al['cond']: st.session_state.us_stocks[idx]['alerts'][a_idx]['cond'] = new_cond_val; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                     with c_inp:
                         if current_type == "固定價格":
                             new_t_price = st.number_input("警示價", value=float(al['price']), step=1.0, key=f"inp_us_{code}_{a_idx}", label_visibility="collapsed")
-                            if new_t_price != al['price']: st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.rerun()
+                            if new_t_price != al['price']: st.session_state.us_stocks[idx]['alerts'][a_idx]['price'] = new_t_price; st.session_state.us_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.us_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False; st.rerun()
                         else: st.markdown(f"<div style='padding-top:5px; color:#cbd5e1;'>自動追蹤現值: **${mas.get(current_type, 0.0):.2f}**</div>", unsafe_allow_html=True)
                     with c_del_al:
                         if st.button("🗑️", key=f"del_al_us_{code}_{a_idx}"): st.session_state.us_stocks[idx]['alerts'].pop(a_idx); save_watchlist(st.session_state.tw_stocks, st.session_state.us_stocks); st.rerun()
@@ -1185,7 +1294,7 @@ with tab_radar:
     default_pool = "2330, 2317, 2454, 3231, 2382, 3443, 2368, 2303, 3034, 2603"
     scan_pool_input = st.text_area("🎯 掃描目標代碼 (用逗號隔開)", value=default_pool)
     
-    if st.button("🚀 啟全域爆量掃描", type="primary"):
+    if st.button("🚀 啟動全域爆量掃描", type="primary"):
         pool_codes = [c.strip() for c in scan_pool_input.split(",") if c.strip()]
         if not pool_codes: st.warning("請先輸入要掃描的股票代碼。")
         else:
