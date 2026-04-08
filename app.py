@@ -464,7 +464,8 @@ def render_index_sparkline(df, prev_close, market_type="TW"):
     area = base.mark_area(color=alt.Gradient(gradient='linear', stops=[alt.GradientStop(color=color, offset=0), alt.GradientStop(color='rgba(0,0,0,0)', offset=1)], x1=1, x2=1, y1=0, y2=1), opacity=0.3).encode(y=alt.Y('Close:Q', scale=alt.Scale(domain=[y_min, y_max], zero=False)), y2=alt.datum(y_min))
     st.altair_chart(alt.layer(rule, area, line).properties(height=80), use_container_width=True)
 
-def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
+# 🔥 走勢圖無縫跳動修復
+def render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts=[], is_us=False):
     if df_1m.empty: return
     chart_df = df_1m[['Open', 'Close', 'Volume']].copy()
     tz_str = 'America/New_York' if is_us else 'Asia/Taipei'
@@ -486,6 +487,20 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
     
     full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
     chart_df = chart_df.reindex(full_index)
+
+    # --- 真實時間無縫填補：解決延遲導致的平移假象 ---
+    now_time = pd.Timestamp.now(tz=tz_str).floor('min')
+    if now_time > end_time: now_time = end_time
+    last_valid_idx = chart_df['Close'].last_valid_index()
+    
+    if curr_p is not None and last_valid_idx is not None:
+        if now_time >= last_valid_idx:
+            last_close = chart_df.loc[last_valid_idx, 'Close']
+            chart_df.loc[last_valid_idx:now_time, 'Close'] = last_close
+            chart_df.loc[last_valid_idx:now_time, 'Open'] = last_close
+            chart_df.loc[now_time, 'Close'] = curr_p
+        else:
+            chart_df.loc[last_valid_idx, 'Close'] = curr_p
         
     chart_df.index.name = 'Time'
     chart_df = chart_df.reset_index()
@@ -551,7 +566,6 @@ def render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts=[], is_us=False):
 
     st.altair_chart(alt.vconcat(main_chart, vol_chart).resolve_scale(x='shared').configure_concat(spacing=0), use_container_width=True)
 
-
 # 🔥 K棒消失終極修復：明確給予 K 棒寬度，並切斷 5K/15K 的時間軸延展
 def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is_us=False, visible_layers=["K棒", "MA3", "MA5", "MA10", "MA23"]):
     if tf == "1K": df = df_1m
@@ -566,37 +580,58 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
 
     if tf == "1K":
         df_chart = df_chart.resample('1min').ffill()
-        if curr_p is not None and not df_chart.empty:
-            last_valid_idx = df_chart['Close'].last_valid_index()
-            if last_valid_idx:
-                df_chart.at[last_valid_idx, 'Close'] = curr_p
-                if curr_p > df_chart.at[last_valid_idx, 'High']: df_chart.at[last_valid_idx, 'High'] = curr_p
-                if curr_p < df_chart.at[last_valid_idx, 'Low']: df_chart.at[last_valid_idx, 'Low'] = curr_p
         
+        if is_us:
+            start_time = pd.Timestamp(datetime.datetime.combine(df_chart.index[-1].date(), datetime.time(9, 30))).tz_localize(tz_str)
+            end_time = pd.Timestamp(datetime.datetime.combine(df_chart.index[-1].date(), datetime.time(16, 0))).tz_localize(tz_str)
+        else:
+            start_time = pd.Timestamp(datetime.datetime.combine(df_chart.index[-1].date(), datetime.time(9, 0))).tz_localize(tz_str)
+            end_time = pd.Timestamp(datetime.datetime.combine(df_chart.index[-1].date(), datetime.time(13, 30))).tz_localize(tz_str)
+            
+        full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
+        df_chart = df_chart.reindex(full_index)
+        
+        now_time = pd.Timestamp.now(tz=tz_str).floor('min')
+        if now_time > end_time: now_time = end_time
+        last_valid_idx = df_chart['Close'].last_valid_index()
+        
+        if curr_p is not None and last_valid_idx is not None:
+            if now_time >= last_valid_idx:
+                last_close = df_chart.loc[last_valid_idx, 'Close']
+                df_chart.loc[last_valid_idx:now_time, 'Close'] = last_close
+                df_chart.loc[last_valid_idx:now_time, 'Open'] = last_close
+                df_chart.loc[last_valid_idx:now_time, 'High'] = last_close
+                df_chart.loc[last_valid_idx:now_time, 'Low'] = last_close
+                
+                df_chart.loc[now_time, 'Close'] = curr_p
+                if curr_p > df_chart.loc[now_time, 'High']: df_chart.loc[now_time, 'High'] = curr_p
+                if curr_p < df_chart.loc[now_time, 'Low']: df_chart.loc[now_time, 'Low'] = curr_p
+            else:
+                df_chart.loc[last_valid_idx, 'Close'] = curr_p
+                if curr_p > df_chart.loc[last_valid_idx, 'High']: df_chart.loc[last_valid_idx, 'High'] = curr_p
+                if curr_p < df_chart.loc[last_valid_idx, 'Low']: df_chart.loc[last_valid_idx, 'Low'] = curr_p
+                
         df_chart['MA3'] = df_chart['Close'].rolling(3).mean()
         df_chart['MA5'] = df_chart['Close'].rolling(5).mean()
         df_chart['MA10'] = df_chart['Close'].rolling(10).mean()
         df_chart['MA23'] = df_chart['Close'].rolling(23).mean()
-        
-        last_date = df_chart.index.dropna()[-1].date()
-        if is_us:
-            start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 30))).tz_localize(tz_str)
-            end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(16, 0))).tz_localize(tz_str)
-        else:
-            start_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(9, 0))).tz_localize(tz_str)
-            end_time = pd.Timestamp(datetime.datetime.combine(last_date, datetime.time(13, 30))).tz_localize(tz_str)
-            
-        full_index = pd.date_range(start=start_time, end=end_time, freq='1min')
-        df_chart = df_chart.reindex(full_index)
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
         start_idx = 0
         end_idx = len(df_chart) - 1
         
-    else: # 5K, 15K, 日K (不延展時間軸，純展示歷史連續 K 棒)
+    else: # 5K, 15K, 日K
         if curr_p is not None and not df_chart.empty:
+            now_time = pd.Timestamp.now(tz=tz_str).floor('min')
             last_idx = df_chart.index[-1]
+            
+            freq_mins = 1440 if tf == "日K" else (15 if tf == "15K" else 5)
+            if (now_time - last_idx).total_seconds() / 60 >= freq_mins:
+                new_row = pd.DataFrame({'Open': [df_chart.at[last_idx, 'Close']], 'High': [curr_p], 'Low': [curr_p], 'Close': [curr_p], 'Volume': [0]}, index=[now_time])
+                df_chart = pd.concat([df_chart, new_row])
+                last_idx = now_time
+                
             df_chart.at[last_idx, 'Close'] = curr_p
             if curr_p > df_chart.at[last_idx, 'High']: df_chart.at[last_idx, 'High'] = curr_p
             if curr_p < df_chart.at[last_idx, 'Low']: df_chart.at[last_idx, 'Low'] = curr_p
@@ -608,7 +643,7 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
         
         df_chart.index.name = 'Time'
         df_chart = df_chart.reset_index()
-        start_idx = max(0, len(df_chart) - 80) # 顯示最近 80 根連續 K 棒
+        start_idx = max(0, len(df_chart) - 80)
         end_idx = len(df_chart) - 1
 
     if df_chart.empty: return
@@ -616,8 +651,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     df_chart['x_idx'] = np.arange(len(df_chart))
     axis_format = '%y/%m/%d' if tf == "日K" else '%m/%d %H:%M'
     df_chart['TimeStr'] = df_chart['Time'].dt.strftime(axis_format)
-    
-    # 十字線保護：避免 Open == Close 時 K 棒高度為 0 而消失
     df_chart['Draw_Close'] = np.where(df_chart['Close'] == df_chart['Open'], df_chart['Close'] + (df_chart['Close'] * 0.0005), df_chart['Close'])
     
     valid_lows = df_chart['Low'].dropna()
@@ -632,7 +665,6 @@ def render_kline_chart(tf, df_1m, df_5k, df_15k, df_daily, curr_p, alerts=[], is
     
     layers = []
     if "K棒" in visible_layers:
-        # 🔥 加入 size 參數強迫賦予 K 棒像素寬度，解決縮成一條線隱形的問題
         rule = base.mark_rule(size=1.5).encode(y=alt.Y('Low:Q', scale=alt.Scale(domain=[y_min, y_max]), title='', axis=alt.Axis(gridColor='#334155')), y2='High:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
         bar = base.mark_bar(size=5).encode(y='Open:Q', y2='Draw_Close:Q', color=alt.condition("datum.Close >= datum.Open", alt.value(up_color), alt.value(down_color)))
         layers.extend([rule, bar])
@@ -925,9 +957,6 @@ with tab_tw:
         if curr_p is None: curr_p = 0.0
         if prev_p is None: prev_p = curr_p
             
-        if curr_p is not None and not df_1m.empty:
-            df_1m.iloc[-1, df_1m.columns.get_loc('Close')] = curr_p
-            
         if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
         if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
         
@@ -1075,9 +1104,7 @@ with tab_tw:
                 for i, c in enumerate(corr_codes):
                     c_name = all_stocks.get(c, c); icon = "👑" if i == 0 else "🔗"
                     cp, pp = live_price_dict.get(c, (None, None))
-                    # 🔥 若 Yahoo 打包漏抓，瞬間單獨向 Yahoo 索取，100% 破除卡死讀取中
-                    if cp is None:
-                        cp, pp = get_single_live_price(c, is_us=False, cache_buster=fast_cache_key)
+                    if cp is None: cp, pp = get_single_live_price(c, is_us=False, cache_buster=fast_cache_key)
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#ef4444' if diff > 0 else '#10b981' if diff < 0 else '#94a3b8'
@@ -1093,7 +1120,7 @@ with tab_tw:
             with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_tw_{code}", label_visibility="collapsed")
 
             c_chart1, c_chart2 = st.columns(2)
-            with c_chart1: render_mini_chart(df_1m, cdp_nh, cdp_nl, alerts, is_us=False)
+            with c_chart1: render_mini_chart(df_1m, cdp_nh, cdp_nl, curr_p, alerts, is_us=False)
             with c_chart2: render_kline_chart(tf_sel, df_1m, df_5k, df_15k, df_daily, curr_p, alerts, is_us=False, visible_layers=layers_sel)
 
             st.markdown("---")
@@ -1182,7 +1209,6 @@ with tab_us:
         live_cp, live_pp = live_price_dict.get(code, (None, None))
         
         if not df_1m_us.empty:
-            curr_p = df_1m_us['Close'].iloc[-1]
             df_1m_us['Typical_Price'] = (df_1m_us['High'] + df_1m_us['Low'] + df_1m_us['Close']) / 3
             df_1m_us['PV'] = df_1m_us['Typical_Price'] * df_1m_us['Volume']
             df_1m_us['Date'] = df_1m_us.index.tz_convert('America/New_York').date
@@ -1203,9 +1229,6 @@ with tab_us:
             
         if curr_p is None: curr_p = 0.0
         if prev_p is None: prev_p = curr_p
-        
-        if curr_p is not None and not df_1m_us.empty:
-            df_1m_us.iloc[-1, df_1m_us.columns.get_loc('Close')] = curr_p
             
         if not df_5k.empty and len(df_5k) >= 10: mas['5分K_10MA'] = df_5k['Close'].tail(10).mean()
         if not df_15k.empty and len(df_15k) >= 10: mas['15分K_10MA'] = df_15k['Close'].tail(10).mean()
@@ -1329,9 +1352,7 @@ with tab_us:
                 for i, c in enumerate(corr_codes):
                     icon = "👑" if i == 0 else "🔗"
                     cp, pp = live_price_dict.get(c, (None, None))
-                    # 🔥 若 Yahoo 打包漏抓，瞬間單獨向 Yahoo 索取，100% 破除卡死讀取中
-                    if cp is None:
-                        cp, pp = get_single_live_price(c, is_us=True, cache_buster=fast_cache_key)
+                    if cp is None: cp, pp = get_single_live_price(c, is_us=True, cache_buster=fast_cache_key)
                     if cp is not None and pp is not None and pp > 0:
                         diff = cp - pp; pct = (diff / pp) * 100; sign = "+" if diff > 0 else ""
                         color = '#10b981' if diff > 0 else '#ef4444' if diff < 0 else '#94a3b8'
@@ -1347,7 +1368,7 @@ with tab_us:
             with c_ctrl3: layers_sel = st.multiselect("圖層開關", ["K棒", "MA3", "MA5", "MA10", "MA23"], default=["K棒", "MA3", "MA5", "MA10", "MA23"], key=f"layers_us_{code}", label_visibility="collapsed")
 
             c_chart1, c_chart2 = st.columns(2)
-            with c_chart1: render_mini_chart(df_1m_us, cdp_nh, cdp_nl, alerts, is_us=True)
+            with c_chart1: render_mini_chart(df_1m_us, cdp_nh, cdp_nl, curr_p, alerts, is_us=True)
             with c_chart2: render_kline_chart(tf_sel, df_1m_us, df_5k, df_15k, df_daily, curr_p, alerts, is_us=True, visible_layers=layers_sel)
 
             st.markdown("---")
@@ -1365,7 +1386,7 @@ with tab_us:
                         if res.get('status') == 'success': st.toast(f"✅ 地端 Agent 收到賣出指令: {code}", icon='❄️')
                         else: st.error(f"❌ {res.get('msg')}")
             else:
-                st.info("🔒 閃電交易按鈕已隱藏。請在左側面板輸入 Google Authenticator 密碼以解鎖火力控制權限。")
+                st.info("🔒 閃交易按鈕已隱藏。請在左側面板輸入 Google Authenticator 密碼以解鎖火力控制權限。")
 
             with st.expander("⚙️ 展開設定：持倉參數 & 專屬監控防線", expanded=False):
                 if st.session_state.authenticated:
