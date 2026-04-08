@@ -733,3 +733,11 @@ with tab_tw:
         
         sl_p = float(stock.get('stop_loss', 0.0))
         if sl_p > 0 and not stock.get('sl_triggered', False) and st.session_state.authenticated and int(stock.get('my_lots', 0)) > 0:
+
+        if cond == ">=" and curr_p < t_p * 0.995: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+        if cond == "<=" and curr_p > t_p * 1.005: st.session_state.tw_stocks[idx]['alerts'][a_idx]['triggered'] = False; st.session_state.tw_stocks[idx]['alerts'][a_idx]['touch_2_triggered'] = False
+        
+        sl_p = float(stock.get('stop_loss', 0.0))
+        if sl_p > 0 and not stock.get('sl_triggered', False) and st.session_state.authenticated and int(stock.get('my_lots', 0)) > 0:
+            # 👇 修正：向右縮排加上 pass 佔位，或是填寫你的停損觸發邏輯
+            pass
