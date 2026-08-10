@@ -458,4 +458,8 @@ def fetch_ai_list(report_type, api_key_hash):
     else: prompt = f"時間 {now}。撈取5筆「真實美股」突破標的。{bypass_rule} 嚴格限制只輸出JSON。JSON: {{ '美股作多': [], '美股作空': [] }} (格式：{{'code': '真實代碼', 'name': '名稱', 'strategy': '特徵'}})" 
     try: 
         response = ai_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0)).text 
-        cleaned_response = response.replace("```json", "").replace("
+        cleaned_response = response.replace("```json", "").replace("```", "").strip() 
+        match = re.search(r'\{.*\}', cleaned_response, re.DOTALL) 
+        if match: return json.loads(match.group(0)) 
+        return None 
+    except: return None
